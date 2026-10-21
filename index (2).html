@@ -1,0 +1,1493 @@
+<!doctype html>
+<html lang="et">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tarkusemets VR – Kehra</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#111;font-family:system-ui,sans-serif}
+  #info{position:fixed;top:10px;left:10px;color:#fff;background:rgba(0,0,0,.65);padding:10px 14px;border-radius:10px;font-size:14px;line-height:1.5;max-width:420px;z-index:5}
+  #info b{color:#ffd54f}
+  #info a{color:#8fd3ff}
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="info">
+  <b>Tarkusemets VR – Kehra</b><br>
+  Questis: vajuta all <b>ENTER VR</b>.<br>
+  Arvutis: klõps = vali, lohista = vaata, <b>WASD</b> = liigu, <b>Shift</b> = jookse,
+  <b>M</b> = kaart, <b>Esc</b> = paus.<br>
+  <span id="loadinfo">Laen…</span><br>
+  <span id="savelink"></span>
+  <div style="opacity:.7;font-size:12px;margin-top:4px">Kaardiandmed © OpenStreetMapi kaastöötajad (ODbL)</div>
+</div>
+<script type="module">
+import * as THREE from 'three';
+import { VRButton } from 'three/addons/webxr/VRButton.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+
+/* =========================================================
+   PÕHI
+   ========================================================= */
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.xr.enabled = true;
+renderer.xr.setReferenceSpaceType('local-floor');
+renderer.xr.setFoveation(1);
+document.body.appendChild(renderer.domElement);
+document.body.appendChild(VRButton.createButton(renderer));
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.05, 320);
+const rig = new THREE.Group();
+scene.add(rig); rig.add(camera);
+camera.position.set(0, 1.6, 0);
+
+const hemi = new THREE.HemisphereLight(0xe4f0ff, 0x4f5f3a, 2.3); scene.add(hemi);
+const sun = new THREE.DirectionalLight(0xfff0d2, 2.6);
+const SUN_DIR = new THREE.Vector3(0.45, 0.62, -0.64).normalize();
+sun.position.copy(SUN_DIR).multiplyScalar(100); scene.add(sun);
+
+const UP = new THREE.Vector3(0, 1, 0);
+const head = new THREE.Vector3(), fwd = new THREE.Vector3();
+const SKY = new THREE.Color(0x9fd3f5), HORIZON = new THREE.Color(0xcfdfe6);
+
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+const srand = mulberry32(20261021);
+const rand = Math.random;
+const randInt = (a, b) => a + Math.floor(rand() * (b - a + 1));
+const pick = a => a[Math.floor(rand() * a.length)];
+const shuffle = a => { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(rand() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+const fmtTime = s => { s = Math.floor(s); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+const hash = n => { n = (n ^ 61) ^ (n >>> 16); n = n + (n << 3); n = n ^ (n >>> 4); n = Math.imul(n, 0x27d4eb2d); return ((n ^ (n >>> 15)) >>> 0) / 4294967296; };
+const FONT = 'system-ui, "Segoe UI", Roboto, Arial, "Noto Color Emoji", "Apple Color Emoji", "Segoe UI Emoji", sans-serif';
+const setLoad = t => { document.getElementById('loadinfo').innerHTML = t; };
+
+/* ---------- heli ---------- */
+let actx = null;
+function audio(){ if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)(); if (actx.state === 'suspended') actx.resume(); return actx; }
+function tone(freq, dur = .15, delay = 0, type = 'sine', vol = .25){
+  const a = audio(), t = a.currentTime + delay, o = a.createOscillator(), g = a.createGain();
+  o.type = type; o.frequency.value = freq;
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g).connect(a.destination); o.start(t); o.stop(t + dur + 0.03);
+}
+const sfx = {
+  ok(){ tone(660, .12); tone(880, .2, .11); },
+  bad(){ tone(170, .3, 0, 'square', .1); },
+  click(){ tone(520, .05, 0, 'triangle', .15); },
+  punch(){ tone(1500, .07, 0, 'square', .1); tone(1500, .07, .12, 'square', .1); },
+  win(){ [523, 659, 784, 1046].forEach((f, i) => tone(f, .22, i * .13)); }
+};
+addEventListener('pointerdown', () => audio(), { once: true });
+
+/* ---------- lõuendi-paneelid ---------- */
+function roundRect(c, x, y, w, h, r){ c.beginPath(); c.moveTo(x + r, y); c.arcTo(x + w, y, x + w, y + h, r); c.arcTo(x + w, y + h, x, y + h, r); c.arcTo(x, y + h, x, y, r); c.arcTo(x, y, x + w, y, r); c.closePath(); }
+function wrapText(c, text, x, y, maxW, lh){
+  const lines = [];
+  for (const para of String(text).split('\n')) {
+    let line = '';
+    for (const w of para.split(' ')) { const t = line ? line + ' ' + w : w; if (line && c.measureText(t).width > maxW) { lines.push(line); line = w; } else line = t; }
+    lines.push(line);
+  }
+  const y0 = y - (lines.length - 1) * lh / 2;
+  lines.forEach((l, i) => c.fillText(l, x, y0 + i * lh));
+}
+function panelBg(c, W, H, fill = 'rgba(15,28,38,0.9)', r = 36){ roundRect(c, 4, 4, W - 8, H - 8, r); c.fillStyle = fill; c.fill(); c.lineWidth = 6; c.strokeStyle = 'rgba(255,255,255,0.3)'; c.stroke(); }
+class CanvasPlane {
+  constructor(w, h, ppm = 400){
+    this.canvas = document.createElement('canvas');
+    this.canvas.width = Math.round(w * ppm); this.canvas.height = Math.round(h * ppm);
+    this.ctx = this.canvas.getContext('2d');
+    this.tex = new THREE.CanvasTexture(this.canvas); this.tex.colorSpace = THREE.SRGBColorSpace; this.tex.anisotropy = 4;
+    this.mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({ map: this.tex, transparent: true, fog: false }));
+  }
+  draw(fn){ const c = this.ctx; c.clearRect(0, 0, this.canvas.width, this.canvas.height); fn(c, this.canvas.width, this.canvas.height); this.tex.needsUpdate = true; return this; }
+}
+
+/* ---------- klõpsatavad objektid ---------- */
+const clickables = new Set();
+function makeClickable(obj, fn){ obj.userData.onClick = fn; obj.userData.baseScale = obj.scale.clone(); clickables.add(obj); }
+function unclick(obj){ obj.traverse(o => clickables.delete(o)); }
+function shown(o){ let last = null; while (o) { if (!o.visible) return false; last = o; o = o.parent; } return last === scene; }
+function visibleClickables(){ return [...clickables].filter(shown); }
+function makeButton(label, w, h, onClick, { color = '#2e7d32', emoji = null, fs = 0.36 } = {}){
+  const p = new CanvasPlane(w, h, 400);
+  p.draw((c, W, H) => {
+    roundRect(c, 5, 5, W - 10, H - 10, Math.min(W, H) * 0.2); c.fillStyle = color; c.fill(); c.lineWidth = 8; c.strokeStyle = 'rgba(255,255,255,.85)'; c.stroke();
+    c.fillStyle = '#fff'; c.textAlign = 'center'; c.textBaseline = 'middle';
+    if (emoji) { c.font = `${H * 0.36}px ${FONT}`; c.fillText(emoji, W / 2, H * 0.32); c.font = `bold ${H * 0.15}px ${FONT}`; wrapText(c, label, W / 2, H * 0.74, W * 0.9, H * 0.17); }
+    else { c.font = `bold ${H * fs}px ${FONT}`; wrapText(c, label, W / 2, H / 2, W * 0.9, H * fs * 1.1); }
+  });
+  makeClickable(p.mesh, onClick);
+  return p.mesh;
+}
+const SHARED = new Set();
+function disposeTree(o){ o.traverse(x => { if (x.geometry && !SHARED.has(x.geometry)) x.geometry.dispose(); if (x.material && !SHARED.has(x.material)) { if (x.material.map) x.material.map.dispose(); x.material.dispose(); } }); }
+
+/* =========================================================
+   SISENDID
+   ========================================================= */
+const raycaster = new THREE.Raycaster(); raycaster.far = 30;
+const tmpM = new THREE.Matrix4(), _o = new THREE.Vector3(), _d = new THREE.Vector3();
+let lastActivate = 0;
+function activate(obj, hit){
+  const now = performance.now(); if (now - lastActivate < 250) return; lastActivate = now;
+  audio(); sfx.click();
+  if (obj.userData.onClick) obj.userData.onClick(obj, hit);
+}
+const hovered = new Map();
+function setHover(src, obj){
+  if (hovered.get(src) === obj) return;
+  hovered.set(src, obj);
+  const hs = new Set(hovered.values());
+  for (const o of clickables) { const s = o.userData.baseScale; if (s && !o.userData.noHover) o.scale.copy(s).multiplyScalar(hs.has(o) ? 1.08 : 1); }
+}
+let leftGrip = null;
+const controllers = [];
+for (let i = 0; i < 2; i++) {
+  const ctrl = renderer.xr.getController(i), grip = renderer.xr.getControllerGrip(i);
+  rig.add(ctrl); rig.add(grip);
+  const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3(0, 0, -1)]), new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: .7 }));
+  line.scale.z = 5; ctrl.add(line);
+  const dot = new THREE.Mesh(new THREE.SphereGeometry(0.012, 8, 8), new THREE.MeshBasicMaterial({ color: 0xffeb3b })); dot.visible = false; scene.add(dot);
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.03, 0.12), new THREE.MeshLambertMaterial({ color: 0x333333 })); body.position.z = 0.03; grip.add(body);
+  const c = { ctrl, grip, line, dot, handedness: null, index: i };
+  ctrl.addEventListener('connected', e => { c.handedness = e.data.handedness; if (c.handedness === 'left') { leftGrip = grip; placeMap(); } });
+  ctrl.addEventListener('disconnected', () => { if (c.handedness === 'left') { leftGrip = null; placeMap(); } c.handedness = null; });
+  ctrl.addEventListener('selectstart', () => { const h = rayFromCtrl(c); if (h) activate(h.object, h); });
+  controllers.push(c);
+}
+function rayFromCtrl(c){
+  tmpM.identity().extractRotation(c.ctrl.matrixWorld);
+  _o.setFromMatrixPosition(c.ctrl.matrixWorld); _d.set(0, 0, -1).applyMatrix4(tmpM);
+  raycaster.set(_o, _d);
+  return raycaster.intersectObjects(visibleClickables(), false)[0] || null;
+}
+let tableHoverUV = null;
+function updateRays(){
+  let tableHit = null;
+  for (const c of controllers) {
+    if (!renderer.xr.isPresenting || !c.handedness) { c.line.visible = false; c.dot.visible = false; continue; }
+    const h = rayFromCtrl(c);
+    c.line.visible = !!h || state !== 'forest' || paused;
+    c.line.scale.z = h ? h.distance : 5;
+    c.dot.visible = !!h; if (h) c.dot.position.copy(h.point);
+    setHover(c.index, h ? h.object : null);
+    if (h && h.object === table.mesh) tableHit = h.uv;
+  }
+  if (renderer.xr.isPresenting) tableHoverUV = tableHit;
+}
+const mouse = new THREE.Vector2();
+let dragging = false, dragMoved = 0, lastX = 0, lastY = 0, pitch = 0;
+function mouseHit(e){ mouse.set(e.clientX / innerWidth * 2 - 1, -(e.clientY / innerHeight) * 2 + 1); raycaster.setFromCamera(mouse, camera); return raycaster.intersectObjects(visibleClickables(), false)[0] || null; }
+renderer.domElement.addEventListener('pointerdown', e => { dragging = true; dragMoved = 0; lastX = e.clientX; lastY = e.clientY; });
+addEventListener('pointerup', e => { if (dragging && dragMoved < 6 && !renderer.xr.isPresenting) { const h = mouseHit(e); if (h) activate(h.object, h); } dragging = false; });
+addEventListener('pointermove', e => {
+  if (renderer.xr.isPresenting) return;
+  if (dragging) {
+    const dx = e.clientX - lastX, dy = e.clientY - lastY; dragMoved += Math.abs(dx) + Math.abs(dy);
+    rig.rotation.y -= dx * 0.004; pitch = THREE.MathUtils.clamp(pitch - dy * 0.004, -1.2, 1.2); camera.rotation.x = pitch;
+    lastX = e.clientX; lastY = e.clientY;
+  } else { const h = mouseHit(e); setHover('mouse', h ? h.object : null); tableHoverUV = h && h.object === table.mesh ? h.uv : null; }
+});
+const keys = {};
+addEventListener('keydown', e => { keys[e.code] = true; if (e.code === 'KeyM') toggleMap(); if (e.code === 'Escape') menuButton(); });
+addEventListener('keyup', e => { keys[e.code] = false; });
+addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+
+const moveInput = new THREE.Vector2();
+const prevBtn = {};
+function edge(k, v, fn){ if (v && !prevBtn[k]) fn(); prevBtn[k] = !!v; }
+let snapReady = true, sprintXR = false;
+function rotateRigAroundHead(a){ camera.getWorldPosition(head); rig.position.sub(head); rig.position.applyAxisAngle(UP, a); rig.position.add(head); rig.rotation.y += a; }
+function updateXRInput(){
+  const session = renderer.xr.getSession(); sprintXR = false; if (!session) return;
+  for (const src of session.inputSources) {
+    const gp = src.gamepad; if (!gp) continue;
+    const ax = gp.axes, b = gp.buttons;
+    const sx = ax.length >= 4 ? ax[2] : (ax[0] || 0), sy = ax.length >= 4 ? ax[3] : (ax[1] || 0);
+    if (src.handedness === 'left') { moveInput.x += sx; moveInput.y += sy; if (b[1] && b[1].pressed) sprintXR = true; }
+    else if (src.handedness === 'right') {
+      if (Math.abs(sx) > 0.7 && snapReady) { snapReady = false; rotateRigAroundHead(sx > 0 ? -Math.PI / 6 : Math.PI / 6); }
+      else if (Math.abs(sx) < 0.3) snapReady = true;
+    }
+    edge(src.handedness + 'B', b[5] && b[5].pressed, () => menuButton());
+    edge(src.handedness + 'A', b[4] && b[4].pressed, () => { if (src.handedness === 'left') toggleMap(); });
+  }
+}
+
+/* =========================================================
+   TAEVAS
+   ========================================================= */
+const skyMesh = new THREE.Mesh(new THREE.SphereGeometry(300, 32, 16), new THREE.ShaderMaterial({
+  side: THREE.BackSide, depthWrite: false, fog: false,
+  uniforms: { top: { value: new THREE.Color(0x4f8fd6) }, hor: { value: HORIZON.clone() }, sunDir: { value: SUN_DIR }, time: { value: 0 } },
+  vertexShader: 'varying vec3 vD; void main(){ vD = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
+  fragmentShader: `uniform vec3 top; uniform vec3 hor; uniform vec3 sunDir; uniform float time; varying vec3 vD;
+    float hs(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+    float ns(vec2 p){ vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f); return mix(mix(hs(i), hs(i + vec2(1.0, 0.0)), f.x), mix(hs(i + vec2(0.0, 1.0)), hs(i + vec2(1.0, 1.0)), f.x), f.y); }
+    float fbm(vec2 p){ float v = 0.0, a = 0.5; for (int i = 0; i < 4; i++) { v += a * ns(p); p *= 2.03; a *= 0.5; } return v; }
+    void main(){
+      vec3 d = normalize(vD); float h = clamp(d.y, 0.0, 1.0);
+      vec3 c = mix(hor, top, pow(h, 0.55));
+      float s = max(dot(d, sunDir), 0.0);
+      if (d.y > 0.02) {
+        vec2 uv = d.xz / (d.y + 0.12) * 1.4 + vec2(time * 0.004, time * 0.002);
+        float cl = smoothstep(0.52, 0.78, fbm(uv));
+        vec3 cc = mix(vec3(0.82, 0.85, 0.9), vec3(1.0), smoothstep(0.5, 0.9, fbm(uv * 1.7 + 3.0)));
+        c = mix(c, cc, cl * 0.85 * smoothstep(0.02, 0.22, d.y));
+      }
+      c += vec3(1.0, 0.9, 0.7) * pow(s, 600.0) * 1.5 + vec3(1.0, 0.85, 0.6) * pow(s, 12.0) * 0.25;
+      gl_FragColor = vec4(c, 1.0);
+    }`
+}));
+skyMesh.renderOrder = -1; skyMesh.frustumCulled = false; skyMesh.visible = false; scene.add(skyMesh);
+
+/* =========================================================
+   KEHRA – OPENSTREETMAP
+   ========================================================= */
+const HALF_W = 1650, HALF_H = 1860, MW = HALF_W * 2, MD = HALF_H * 2;   // ~3,3 × 3,7 km
+let LAT0 = 59.3355, LON0 = 25.336, KX = 111320 * Math.cos(LAT0 * Math.PI / 180);
+const KZ = 110540;
+const ll2w = (lat, lon) => [(lon - LON0) * KX, -(lat - LAT0) * KZ];
+const OVERPASS = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter', 'https://maps.mail.ru/osm/tools/overpass/api/interpreter'];
+async function overpass(q){
+  let err;
+  for (const u of OVERPASS) {
+    try {
+      const r = await fetch(u, { method: 'POST', body: 'data=' + encodeURIComponent(q), headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+      if (r.ok) return await r.json();
+      err = new Error('HTTP ' + r.status);
+    } catch (e) { err = e; }
+  }
+  throw err;
+}
+async function loadOSM(){
+  try { const r = await fetch('kehra_osm.json'); if (r.ok) { setLoad('Laen faili kehra_osm.json…'); const d = await r.json(); if (d.elements) {
+      if (!d.center) {
+        const k = d.elements.find(e => e.type === 'node' && e.tags && e.tags.name === 'Kehra' && e.tags.place);
+        if (k) d.center = { lat: k.lat, lon: k.lon };
+        else { let la = 0, lo = 0, n = 0; for (const e of d.elements) if (e.type === 'node' && e.lat) { la += e.lat; lo += e.lon; n++; } d.center = n ? { lat: la / n, lon: lo / n } : { lat: LAT0, lon: LON0 }; }
+      }
+      return { data: d, fromFile: true };
+    } } } catch (e) {}
+  setLoad('Laen OpenStreetMapist Kehra andmeid… (10–60 s)');
+  let lat = LAT0, lon = LON0;
+  try {
+    const p = await overpass('[out:json][timeout:25];node["name"="Kehra"]["place"~"town|village"];out 1;');
+    if (p.elements && p.elements.length) { lat = p.elements[0].lat; lon = p.elements[0].lon; }
+  } catch (e) {}
+  const dLat = HALF_H / KZ, dLon = HALF_W / (111320 * Math.cos(lat * Math.PI / 180));
+  const bb = `${(lat - dLat).toFixed(6)},${(lon - dLon).toFixed(6)},${(lat + dLat).toFixed(6)},${(lon + dLon).toFixed(6)}`;
+  const q = `[out:json][timeout:120][bbox:${bb}];(way["building"];way["highway"];way["railway"];way["waterway"];way["natural"];relation["natural"];way["landuse"];relation["landuse"];way["leisure"];way["amenity"];way["barrier"~"fence|wall"];node["place"];node["railway"="station"];node["natural"="tree"];);out geom;`;
+  const data = await overpass(q);
+  data.center = { lat, lon };
+  return { data, fromFile: false };
+}
+
+// --- töötlus ---
+const near = (p, q) => Math.abs(p[0] - q[0]) < 0.05 && Math.abs(p[1] - q[1]) < 0.05;
+function stitch(segs){
+  const rings = [], pool = segs.filter(s => s.length > 1).map(s => s.slice());
+  while (pool.length) {
+    let ring = pool.shift(), guard = 0;
+    while (guard++ < 5000) {
+      const a = ring[0], b = ring[ring.length - 1];
+      if (ring.length > 3 && near(a, b)) break;
+      let found = false;
+      for (let i = 0; i < pool.length; i++) {
+        const s = pool[i], s0 = s[0], s1 = s[s.length - 1];
+        if (near(b, s0)) ring = ring.concat(s.slice(1));
+        else if (near(b, s1)) ring = ring.concat(s.slice(0, -1).reverse());
+        else if (near(a, s1)) ring = s.slice(0, -1).concat(ring);
+        else if (near(a, s0)) ring = s.slice(1).reverse().concat(ring);
+        else continue;
+        pool.splice(i, 1); found = true; break;
+      }
+      if (!found) break;
+    }
+    rings.push(ring);
+  }
+  return rings;
+}
+const polyArea = r => { let a = 0; for (let i = 0, j = r.length - 1; i < r.length; j = i++) a += (r[j][0] + r[i][0]) * (r[j][1] - r[i][1]); return Math.abs(a / 2); };
+const centroid = r => { let x = 0, z = 0; for (const p of r) { x += p[0]; z += p[1]; } return [x / r.length, z / r.length]; };
+function areaKind(t){
+  const lu = t.landuse, na = t.natural, le = t.leisure;
+  if (na === 'water' || t.waterway === 'riverbank' || lu === 'reservoir' || lu === 'basin') return 'water';
+  if (lu === 'forest' || na === 'wood') return 'forest';
+  if (na === 'scrub') return 'scrub';
+  if (na === 'wetland') return 'wetland';
+  if (lu === 'farmland') return 'farmland';
+  if (['meadow', 'grass', 'village_green', 'recreation_ground', 'greenfield'].includes(lu) || ['grassland', 'heath'].includes(na) || ['park', 'garden', 'stadium', 'sports_centre', 'playground'].includes(le)) return 'grass';
+  if (lu === 'residential') return 'residential';
+  if (['industrial', 'commercial', 'retail', 'railway', 'construction', 'brownfield', 'landfill', 'quarry', 'garages'].includes(lu)) return 'industrial';
+  if (['allotments', 'orchard', 'plant_nursery', 'farmyard'].includes(lu)) return 'allotments';
+  if (lu === 'cemetery') return 'cemetery';
+  if (le === 'pitch') return 'pitch';
+  if (le === 'track') return 'track';
+  if (t.amenity === 'parking') return 'parking';
+  if (na === 'sand' || na === 'bare_rock') return 'sand';
+  return null;
+}
+const F = { areas: [], roads: [], rails: [], waterways: [], buildings: [], fences: [], places: [], trees: [] };
+function classify(t, rings, closed, id){
+  const main = rings[0]; if (!main || main.length < 2) return;
+  if (t.name && (t.leisure === 'stadium' || t.amenity === 'school' || t.amenity === 'place_of_worship' || t.landuse === 'industrial' || t.leisure === 'park')) {
+    const [x, z] = centroid(main); F.places.push({ name: t.name, x, z, kind: 'landmark' });
+  }
+  if (t.building && t.building !== 'no' && closed) { F.buildings.push({ ring: main, t, id }); return; }
+  if (closed) { const k = areaKind(t); if (k) F.areas.push({ kind: k, rings, leaf: t.leaf_type, id, area: polyArea(main) }); }
+  if (t.highway && !closed || (t.highway && t.area !== 'yes' && closed && !areaKind(t))) F.roads.push({ pts: main, type: t.highway, bridge: !!t.bridge && t.bridge !== 'no', paved: !t.surface || /asphalt|paved|concrete|paving/.test(t.surface), tunnel: t.tunnel === 'yes' });
+  if (t.railway === 'rail' || t.railway === 'light_rail') F.rails.push({ pts: main, bridge: !!t.bridge && t.bridge !== 'no' });
+  if (t.waterway && t.waterway !== 'riverbank') F.waterways.push({ pts: main, type: t.waterway, width: parseFloat(t.width) || 0, tunnel: t.tunnel === 'culvert' || t.tunnel === 'yes' });
+  if (t.barrier) F.fences.push(main);
+}
+function processOSM(data){
+  LAT0 = data.center.lat; LON0 = data.center.lon; KX = 111320 * Math.cos(LAT0 * Math.PI / 180);
+  for (const el of data.elements) {
+    const t = el.tags || {};
+    if (el.type === 'node') {
+      const [x, z] = ll2w(el.lat, el.lon);
+      if (t.place && t.name) F.places.push({ name: t.name, x, z, kind: t.place });
+      else if (t.railway === 'station' && t.name) F.places.push({ name: t.name + ' raudteejaam', x, z, kind: 'landmark' });
+      else if (t.natural === 'tree') F.trees.push([x, z]);
+    } else if (el.type === 'way' && el.geometry) {
+      const pts = el.geometry.filter(g => g).map(g => ll2w(g.lat, g.lon));
+      const closed = pts.length > 3 && el.nodes && el.nodes[0] === el.nodes[el.nodes.length - 1];
+      if (closed) pts.pop();
+      classify(t, [pts], closed, el.id);
+    } else if (el.type === 'relation' && (t.type === 'multipolygon' || t.type === 'boundary') && el.members) {
+      const outers = [], inners = [];
+      for (const m of el.members) { if (m.type !== 'way' || !m.geometry) continue; const seg = m.geometry.filter(g => g).map(g => ll2w(g.lat, g.lon)); (m.role === 'inner' ? inners : outers).push(seg); }
+      const rings = [...stitch(outers), ...stitch(inners)];
+      if (t.type === 'multipolygon') classify(t, rings, true, el.id);
+    }
+  }
+  F.areas.sort((a, b) => b.area - a.area);
+}
+
+/* ---------- joonistamine lõuendile ---------- */
+function pathRings(c, rings, T){ c.beginPath(); for (const r of rings) { r.forEach((p, i) => { const X = (p[0] - T.x0) * T.s, Y = (p[1] - T.z0) * T.s; i ? c.lineTo(X, Y) : c.moveTo(X, Y); }); c.closePath(); } }
+function pathLine(c, pts, T){ c.beginPath(); pts.forEach((p, i) => { const X = (p[0] - T.x0) * T.s, Y = (p[1] - T.z0) * T.s; i ? c.lineTo(X, Y) : c.moveTo(X, Y); }); }
+const ROADW = { motorway: 10, trunk: 9, primary: 8, secondary: 7.5, tertiary: 6.5, unclassified: 5, residential: 5, living_street: 4.5, service: 3.5, track: 3, pedestrian: 3, footway: 1.6, path: 1.4, cycleway: 2, bridleway: 1.6, steps: 1.6 };
+const roadW = r => ROADW[r.type] || 3;
+const waterW = w => w.width || ({ river: 18, canal: 8, stream: 3, ditch: 1.5, drain: 1.5 }[w.type] || 2);
+const isPath = r => ['footway', 'path', 'cycleway', 'bridleway', 'steps'].includes(r.type);
+
+// realistlik maapind
+const GROUND_COL = { forest: '#3e5a2e', scrub: '#5f7b3e', wetland: '#5a7254', grass: '#7fa955', residential: '#86a15e', industrial: '#8c8b80', allotments: '#7a9a4c', cemetery: '#6c8c52', pitch: '#4f9c48', track: '#b5543e', parking: '#8a8a86', sand: '#c9b98d', water: '#2f4f66' };
+function drawGround(c, T){
+  c.fillStyle = '#7a9a50'; c.fillRect(0, 0, c.canvas.width, c.canvas.height);
+  for (const a of F.areas) {
+    let col = GROUND_COL[a.kind];
+    if (a.kind === 'farmland') col = ['#9a8757', '#8da552', '#a89a5e'][a.id % 3];
+    pathRings(c, a.rings, T); c.fillStyle = col; c.fill('evenodd');
+  }
+  c.lineCap = 'round'; c.lineJoin = 'round';
+  for (const w of F.waterways) { if (w.tunnel) continue; pathLine(c, w.pts, T); c.strokeStyle = GROUND_COL.water; c.lineWidth = waterW(w) * T.s; c.stroke(); }
+  const order = [...F.roads].sort((a, b) => roadW(a) - roadW(b));
+  for (const r of order) {
+    if (r.tunnel) continue;
+    pathLine(c, r.pts, T);
+    c.strokeStyle = isPath(r) ? '#a8996f' : r.type === 'track' || !r.paved ? '#ad9c74' : '#686866';
+    c.lineWidth = Math.max(1, roadW(r) * T.s); c.stroke();
+  }
+  for (const r of F.rails) { pathLine(c, r.pts, T); c.strokeStyle = '#776f66'; c.lineWidth = 4.5 * T.s; c.stroke(); c.strokeStyle = '#3c3a38'; c.lineWidth = Math.max(1, 1.6 * T.s); c.stroke(); }
+  c.fillStyle = '#5e5e5e'; for (const b of F.buildings) { pathRings(c, [b.ring], T); c.fill(); }
+}
+// orienteerumiskaart (ISOM laadis)
+function drawOMap(c, T, W, H){
+  c.fillStyle = '#ffedc0'; c.fillRect(0, 0, W, H);
+  const OC = { forest: '#ffffff', scrub: '#c8eeb4', wetland: '#bfe7f3', grass: '#ffd27f', farmland: '#ffd27f', pitch: '#ffd27f', residential: '#c9d59d', allotments: '#c9d59d', cemetery: '#c9d59d', industrial: '#d6c9ad', parking: '#d6c9ad', track: '#e0b98f', sand: '#ffe9a8', water: '#5ec6ef' };
+  for (const a of F.areas) { pathRings(c, a.rings, T); c.fillStyle = OC[a.kind] || '#ffedc0'; c.fill('evenodd'); if (a.kind === 'water') { c.strokeStyle = '#1a1a1a'; c.lineWidth = 1; c.stroke(); } }
+  drawContours(c, T, W, H);
+  c.lineCap = 'round'; c.lineJoin = 'round';
+  for (const w of F.waterways) { if (w.tunnel) continue; pathLine(c, w.pts, T); c.strokeStyle = '#3fb4ea'; c.lineWidth = Math.max(1.5, waterW(w) * T.s); c.stroke(); }
+  const roads = [...F.roads].sort((a, b) => roadW(a) - roadW(b));
+  for (const r of roads) {
+    pathLine(c, r.pts, T);
+    if (['motorway', 'trunk', 'primary', 'secondary', 'tertiary'].includes(r.type)) {
+      const w = Math.max(4, roadW(r) * T.s * 0.9);
+      c.setLineDash([]); c.strokeStyle = '#1a1a1a'; c.lineWidth = w + 2; c.stroke(); pathLine(c, r.pts, T); c.strokeStyle = '#e8a35a'; c.lineWidth = w; c.stroke();
+    } else if (isPath(r)) { c.setLineDash([5, 4]); c.strokeStyle = '#1a1a1a'; c.lineWidth = 1.3; c.stroke(); }
+    else if (r.type === 'track') { c.setLineDash([9, 3]); c.strokeStyle = '#1a1a1a'; c.lineWidth = 1.8; c.stroke(); }
+    else { c.setLineDash([]); c.strokeStyle = '#1a1a1a'; c.lineWidth = Math.max(1.8, 3.2 * T.s); c.stroke(); }
+  }
+  c.setLineDash([]);
+  for (const r of F.rails) { pathLine(c, r.pts, T); c.strokeStyle = '#1a1a1a'; c.lineWidth = 3.5; c.stroke(); pathLine(c, r.pts, T); c.setLineDash([8, 8]); c.strokeStyle = '#fff'; c.lineWidth = 1.4; c.stroke(); c.setLineDash([]); }
+  c.strokeStyle = '#1a1a1a'; c.lineWidth = 0.8; for (const f of F.fences) { pathLine(c, f, T); c.stroke(); }
+  c.fillStyle = '#2b2b2b'; for (const b of F.buildings) { pathRings(c, [b.ring], T); c.fill(); }
+  c.strokeStyle = 'rgba(40,90,220,.45)'; c.lineWidth = 1;
+  for (let x = Math.ceil(T.x0 / 250) * 250; (x - T.x0) * T.s < W; x += 250) { const X = (x - T.x0) * T.s; c.beginPath(); c.moveTo(X, 0); c.lineTo(X, H); c.stroke(); }
+}
+
+/* ---------- loogika-maskid (2 m ruut) ---------- */
+const GR = 2, GW = Math.ceil(MW / GR), GH = Math.ceil(MD / GR);
+let forestG = null, waterG = null, grassG = null;
+function maskFrom(drawFn){
+  const cv = document.createElement('canvas'); cv.width = GW; cv.height = GH;
+  const c = cv.getContext('2d', { willReadFrequently: true });
+  c.fillStyle = '#000'; c.fillRect(0, 0, GW, GH);
+  drawFn(c, { x0: -HALF_W, z0: -HALF_H, s: 1 / GR });
+  const d = c.getImageData(0, 0, GW, GH).data, out = new Uint8Array(GW * GH);
+  for (let i = 0; i < out.length; i++) out[i] = d[i * 4];
+  return { arr: out, canvas: cv };
+}
+const gIdx = (x, z) => { const gx = Math.floor((x + HALF_W) / GR), gz = Math.floor((z + HALF_H) / GR); return gx < 0 || gz < 0 || gx >= GW || gz >= GH ? -1 : gz * GW + gx; };
+const isWater = (x, z) => { if (!waterG) return false; const i = gIdx(x, z); return i >= 0 && waterG[i] > 127; };
+const forestAt = (x, z) => { if (!forestG) return 0; const i = gIdx(x, z); return i < 0 ? 0 : forestG[i]; };
+const grassAt = (x, z) => { if (!grassG) return 0; const i = gIdx(x, z); return i < 0 ? 0 : grassG[i]; };
+
+/* ---------- maastiku kõrgused (jõeorg + künkad, 4 m ruut) ---------- */
+const HGR = 4, HGW = Math.ceil(MW / HGR) + 1, HGH = Math.ceil(MD / HGR) + 1;
+const VALLEY = 4, WATER_Y = -VALLEY + 0.8;
+let hgt = null;
+function buildHeights(){
+  const INF = 1e9, d = new Float32Array(HGW * HGH);
+  for (let j = 0; j < HGH; j++) for (let i = 0; i < HGW; i++) {
+    const x = i * HGR - HALF_W, z = j * HGR - HALF_H;
+    d[j * HGW + i] = (isWater(x, z) || isWater(x + 2, z) || isWater(x, z + 2) || isWater(x + 2, z + 2)) ? 0 : INF;
+  }
+  const a = HGR, b = HGR * Math.SQRT2;
+  for (let j = 0; j < HGH; j++) for (let i = 0; i < HGW; i++) {
+    const k = j * HGW + i; let v = d[k];
+    if (i > 0) v = Math.min(v, d[k - 1] + a);
+    if (j > 0) { v = Math.min(v, d[k - HGW] + a); if (i > 0) v = Math.min(v, d[k - HGW - 1] + b); if (i < HGW - 1) v = Math.min(v, d[k - HGW + 1] + b); }
+    d[k] = v;
+  }
+  for (let j = HGH - 1; j >= 0; j--) for (let i = HGW - 1; i >= 0; i--) {
+    const k = j * HGW + i; let v = d[k];
+    if (i < HGW - 1) v = Math.min(v, d[k + 1] + a);
+    if (j < HGH - 1) { v = Math.min(v, d[k + HGW] + a); if (i < HGW - 1) v = Math.min(v, d[k + HGW + 1] + b); if (i > 0) v = Math.min(v, d[k + HGW - 1] + b); }
+    d[k] = v;
+  }
+  hgt = new Float32Array(HGW * HGH);
+  for (let j = 0; j < HGH; j++) for (let i = 0; i < HGW; i++) {
+    const k = j * HGW + i, x = i * HGR - HALF_W, z = j * HGR - HALF_H;
+    const f = 1 - THREE.MathUtils.smoothstep(d[k], 1, 38);
+    const edgeF = Math.max(0, Math.min(1, (HALF_W - Math.abs(x)) / 150, (HALF_H - Math.abs(z)) / 150));
+    const n = (0.9 * Math.sin(x * 0.011 + 1.3) * Math.cos(z * 0.013) + 0.55 * Math.sin(x * 0.027 + z * 0.019 + 0.4) + 0.25 * Math.sin(z * 0.05 - x * 0.03)) * edgeF;
+    hgt[k] = -VALLEY * f + n * (1 - f);
+  }
+}
+function heightAt(x, z){
+  if (!hgt) return 0;
+  const fx = (x + HALF_W) / HGR, fz = (z + HALF_H) / HGR, i = Math.floor(fx), j = Math.floor(fz);
+  if (i < 0 || j < 0 || i >= HGW - 1 || j >= HGH - 1) return 0;
+  const tx = fx - i, tz = fz - j, k = j * HGW + i;
+  return (hgt[k] * (1 - tx) + hgt[k + 1] * tx) * (1 - tz) + (hgt[k + HGW] * (1 - tx) + hgt[k + HGW + 1] * tx) * tz;
+}
+function drawContours(c, T, W, H){
+  if (!hgt) return;
+  c.fillStyle = '#c0782c';
+  const st = 1 / T.s;
+  for (let py = 0; py < H; py++) for (let px = 0; px < W; px++) {
+    const x = T.x0 + px * st, z = T.z0 + py * st;
+    if (isWater(x, z)) continue;
+    const l = Math.floor(heightAt(x, z) / 1.0);
+    if (l !== Math.floor(heightAt(x + st, z)) || l !== Math.floor(heightAt(x, z + st))) c.fillRect(px, py, 1.3, 1.3);
+  }
+}
+
+/* ---------- sillad ---------- */
+const bridges = [];
+function prepBridges(){
+  for (const r of [...F.roads.filter(r => r.bridge && !isPath(r)), ...F.rails.filter(r => r.bridge).map(r => ({ ...r, type: 'rail' })), ...F.roads.filter(r => r.bridge && isPath(r))]) {
+    const w = r.type === 'rail' ? 5 : Math.max(2.2, roadW(r) + 1);
+    const ends = [r.pts[0], r.pts[r.pts.length - 1]];
+    const y = Math.max(...ends.map(p => heightAt(p[0], p[1]))) + 0.25;
+    let minx = 1e9, maxx = -1e9, minz = 1e9, maxz = -1e9;
+    for (const p of r.pts) { minx = Math.min(minx, p[0]); maxx = Math.max(maxx, p[0]); minz = Math.min(minz, p[1]); maxz = Math.max(maxz, p[1]); }
+    bridges.push({ pts: r.pts, w, y, minx: minx - w, maxx: maxx + w, minz: minz - w, maxz: maxz + w });
+  }
+}
+function bridgeY(x, z){
+  for (const b of bridges) {
+    if (x < b.minx || x > b.maxx || z < b.minz || z > b.maxz) continue;
+    for (let i = 0; i < b.pts.length - 1; i++) if (distSeg(x, z, b.pts[i], b.pts[i + 1]) < b.w / 2 + 0.3) return b.y;
+  }
+  return null;
+}
+function buildBridges(){
+  const geos = [];
+  for (const b of bridges) for (let i = 0; i < b.pts.length - 1; i++) {
+    const p = b.pts[i], q = b.pts[i + 1], L = Math.hypot(q[0] - p[0], q[1] - p[1]); if (L < 0.3) continue;
+    const ang = Math.atan2(q[1] - p[1], q[0] - p[0]), mx = (p[0] + q[0]) / 2, mz = (p[1] + q[1]) / 2;
+    const deck = new THREE.BoxGeometry(L + 0.4, 0.5, b.w).translate(0, b.y - 0.25, 0);
+    const r1 = new THREE.BoxGeometry(L + 0.4, 1.0, 0.12).translate(0, b.y + 0.5, b.w / 2), r2 = new THREE.BoxGeometry(L + 0.4, 1.0, 0.12).translate(0, b.y + 0.5, -b.w / 2);
+    for (const g of [deck, r1, r2]) { g.rotateY(-ang); g.translate(mx, 0, mz); geos.push(NI(g)); }
+  }
+  if (!geos.length) return null;
+  return new THREE.Mesh(mergeGeometries(geos), new THREE.MeshLambertMaterial({ color: 0x9a9893 }));
+}
+
+/* ---------- majad ---------- */
+const bGrid = new Map(), BG = 40;
+function pointInRing(x, z, r){ let inside = false; for (let i = 0, j = r.length - 1; i < r.length; j = i++) { const xi = r[i][0], zi = r[i][1], xj = r[j][0], zj = r[j][1]; if ((zi > z) !== (zj > z) && x < (xj - xi) * (z - zi) / (zj - zi) + xi) inside = !inside; } return inside; }
+function distSeg(x, z, a, b){ const dx = b[0] - a[0], dz = b[1] - a[1], L = dx * dx + dz * dz || 1; let t = ((x - a[0]) * dx + (z - a[1]) * dz) / L; t = Math.max(0, Math.min(1, t)); return Math.hypot(x - a[0] - t * dx, z - a[1] - t * dz); }
+function inBuilding(x, z, pad = 0.35){
+  const list = bGrid.get(Math.floor(x / BG) * 100000 + Math.floor(z / BG)); if (!list) return false;
+  for (const b of list) {
+    if (x < b.minx - pad || x > b.maxx + pad || z < b.minz - pad || z > b.maxz + pad) continue;
+    if (pointInRing(x, z, b.ring)) return true;
+    for (let i = 0, j = b.ring.length - 1; i < b.ring.length; j = i++) if (distSeg(x, z, b.ring[j], b.ring[i]) < pad) return true;
+  }
+  return false;
+}
+function obb(pts){
+  let best = null;
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i], q = pts[(i + 1) % pts.length], a = Math.atan2(q[1] - p[1], q[0] - p[0]), c = Math.cos(a), s = Math.sin(a);
+    let mnu = 1e9, mxu = -1e9, mnv = 1e9, mxv = -1e9;
+    for (const r of pts) { const u = r[0] * c + r[1] * s, v = -r[0] * s + r[1] * c; mnu = Math.min(mnu, u); mxu = Math.max(mxu, u); mnv = Math.min(mnv, v); mxv = Math.max(mxv, v); }
+    const A = (mxu - mnu) * (mxv - mnv);
+    if (!best || A < best.A) best = { A, c, s, mnu, mxu, mnv, mxv };
+  }
+  return best;
+}
+// tekstuurid (3 × 3 m sein, 2 × 2 m katus)
+function makeTex(draw, size = 256){ const c = document.createElement('canvas'); c.width = c.height = size; draw(c.getContext('2d'), size); const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4; return t; }
+function noiseOver(x, S, amp){ const img = x.getImageData(0, 0, S, S), d = img.data; for (let i = 0; i < d.length; i += 4) { const n = (Math.random() - 0.5) * amp; d[i] += n; d[i + 1] += n; d[i + 2] += n; } x.putImageData(img, 0, 0); }
+function windowOn(x, S){
+  const w = S * 0.36, h = S * 0.42, x0 = (S - w) / 2, y0 = S * 0.22;
+  x.fillStyle = '#f4f4f4'; x.fillRect(x0 - 7, y0 - 7, w + 14, h + 14);
+  x.fillStyle = '#2d3a44'; x.fillRect(x0, y0, w, h);
+  const g = x.createLinearGradient(x0, y0, x0 + w, y0 + h); g.addColorStop(0, 'rgba(170,200,220,.55)'); g.addColorStop(0.5, 'rgba(90,120,140,.15)'); g.addColorStop(1, 'rgba(40,60,70,0)');
+  x.fillStyle = g; x.fillRect(x0, y0, w, h);
+  x.fillStyle = '#f4f4f4'; x.fillRect(x0 + w / 2 - 3, y0, 6, h); x.fillRect(x0, y0 + h * 0.42, w, 5);
+  x.fillStyle = '#d6d6d6'; x.fillRect(x0 - 12, y0 + h + 7, w + 24, 9);
+}
+const TEX = {
+  plaster: makeTex((x, S) => { x.fillStyle = '#f1f1f1'; x.fillRect(0, 0, S, S); noiseOver(x, S, 16); x.fillStyle = 'rgba(0,0,0,.06)'; x.fillRect(0, S - 10, S, 10); windowOn(x, S); }),
+  wood: makeTex((x, S) => { x.fillStyle = '#efefef'; x.fillRect(0, 0, S, S); noiseOver(x, S, 12); for (let y = 0; y < S; y += 16) { x.fillStyle = 'rgba(0,0,0,.22)'; x.fillRect(0, y, S, 2); x.fillStyle = 'rgba(255,255,255,.25)'; x.fillRect(0, y + 2, S, 1); } windowOn(x, S); }),
+  brick: makeTex((x, S) => { x.fillStyle = '#d4d0ca'; x.fillRect(0, 0, S, S); for (let r = 0, y = 0; y < S; r++, y += 11) for (let bx = (r % 2) * -13; bx < S; bx += 27) { const v = 205 + Math.random() * 50; x.fillStyle = `rgb(${v},${v * 0.97},${v * 0.95})`; x.fillRect(bx + 1, y + 1, 25, 9); } windowOn(x, S); }),
+  roof: makeTex((x, S) => { for (let X = 0; X < S; X++) { const v = 200 + 45 * Math.sin(X / S * Math.PI * 2 * 12); x.fillStyle = `rgb(${v},${v},${v})`; x.fillRect(X, 0, 1, S); } noiseOver(x, S, 14); x.fillStyle = 'rgba(0,0,0,.15)'; for (let y = 0; y < S; y += 64) x.fillRect(0, y, S, 2); })
+};
+const WALLC = {
+  wood: ['#e7c75a', '#b8543a', '#8a3b2b', '#e9e4d6', '#9fb3b8', '#7d9a6a', '#d8c39a', '#c98d4d'],
+  plaster: ['#f0ebe0', '#e8dfc8', '#dcd6cc', '#f4f1ea', '#d7c9a8', '#cfd4d2', '#e3d2b4'],
+  brick: ['#b65a42', '#a34d38', '#c46d50', '#9b5a48', '#c9a27c']
+};
+const ROOFC = { pitched: ['#55565b', '#3f4046', '#7d3c2e', '#8f4b35', '#4f604a', '#6a6f75', '#6b2f2a', '#3e4a5a'], flat: ['#5d5d5d', '#4d4d50', '#6e6c66', '#575a5c'] };
+function prepBuildings(){
+  for (const b of F.buildings) {
+    const ring = b.ring; b.ok = ring.length >= 3 && polyArea(ring) >= 6; if (!b.ok) continue;
+    const area = polyArea(ring), t = b.t, type = t.building, h = hash(b.id);
+    const lv = parseFloat(t['building:levels']), ht = parseFloat(t.height);
+    const big = ['apartments', 'industrial', 'commercial', 'retail', 'warehouse', 'school', 'office', 'hospital', 'public', 'civic', 'church', 'train_station', 'kindergarten', 'sports_hall'].includes(type);
+    const small = ['garage', 'garages', 'shed', 'hut', 'roof', 'carport', 'greenhouse', 'barn', 'farm_auxiliary', 'service'].includes(type);
+    let H = ht || (lv ? lv * 3 + 0.4 : null);
+    if (!H) H = small ? 2.6 : type === 'apartments' ? 12 : ['industrial', 'warehouse'].includes(type) ? 8 : type === 'school' ? 9 : type === 'church' ? 11 : area > 700 ? 8 : area > 250 ? 6.5 : 4.4;
+    const rs = t['roof:shape'];
+    b.H = H; b.small = small; b.big = big; b.h = h;
+    b.gabled = rs ? /gabled|hipped|pitched|half-hipped|mansard|gambrel/.test(rs) : (!big && !small && area < 350 && H <= 8.5);
+    b.mat = big ? (h < 0.7 ? 'plaster' : 'brick') : small ? (h < 0.5 ? 'wood' : 'plaster') : (h < 0.5 ? 'wood' : h < 0.85 ? 'plaster' : 'brick');
+    let mn = 1e9; for (const p of ring) mn = Math.min(mn, heightAt(p[0], p[1])); b.base = mn;
+  }
+}
+function buildBuildings(){
+  const B = {}; for (const k of ['plaster', 'wood', 'brick', 'roof']) B[k] = { P: [], N: [], C: [], U: [] };
+  const va = new THREE.Vector3(), vb = new THREE.Vector3(), vc = new THREE.Vector3(), n = new THREE.Vector3();
+  const tri = (bk, a, b, c, color, ua, ub, uc) => {
+    va.fromArray(a); vb.fromArray(b); vc.fromArray(c);
+    n.subVectors(vb, va).cross(vc.sub(va)).normalize();
+    for (const [v, uv] of [[a, ua], [b, ub], [c, uc]]) { bk.P.push(v[0], v[1], v[2]); bk.N.push(n.x, n.y, n.z); bk.C.push(color.r, color.g, color.b); bk.U.push(uv[0], uv[1]); }
+  };
+  const PLAIN = [0.05, 0.05];
+  for (const b of F.buildings) {
+    if (!b.ok) continue;
+    const ring = b.ring, H = b.H, y0 = b.base - 0.6, yT = b.base + H, h = b.h;
+    const list = WALLC[b.mat], wallC = new THREE.Color(list[Math.floor(h * 7919) % list.length]);
+    const roofC = new THREE.Color((b.gabled ? ROOFC.pitched : ROOFC.flat)[Math.floor(h * 104729) % (b.gabled ? 8 : 4)]);
+    const WB = B[b.mat], RB = B.roof;
+    let acc = 0;
+    for (let i = 0; i < ring.length; i++) {
+      const p = ring[i], q = ring[(i + 1) % ring.length], L = Math.hypot(q[0] - p[0], q[1] - p[1]); if (L < 0.05) continue;
+      const u0 = acc / 3, u1 = (acc + L) / 3, v0 = (y0 - b.base) / 3, v1 = H / 3; acc += L;
+      const A = [p[0], y0, p[1]], Bv = [q[0], y0, q[1]], Cc = [q[0], yT, q[1]], D = [p[0], yT, p[1]];
+      if (!b.small) { tri(WB, A, Bv, Cc, wallC, [u0, v0], [u1, v0], [u1, v1]); tri(WB, A, Cc, D, wallC, [u0, v0], [u1, v1], [u0, v1]); }
+      else { tri(WB, A, Bv, Cc, wallC, PLAIN, PLAIN, PLAIN); tri(WB, A, Cc, D, wallC, PLAIN, PLAIN, PLAIN); }
+    }
+    if (b.gabled) {
+      const o = obb(ring), alongU = (o.mxu - o.mnu) >= (o.mxv - o.mnv), ov = 0.45;
+      const r0 = alongU ? o.mnu : o.mnv, r1 = alongU ? o.mxu : o.mxv, w0 = alongU ? o.mnv : o.mnu, w1 = alongU ? o.mxv : o.mxu, wm = (w0 + w1) / 2;
+      const Hr = yT + Math.min(4.5, (w1 - w0) * 0.42);
+      const W3 = (r, w, y) => { const u = alongU ? r : w, v = alongU ? w : r; return [u * o.c - v * o.s, y, u * o.s + v * o.c]; };
+      const eY = yT - 0.3, sl = Math.hypot((w1 - w0) / 2 + ov, Hr - eY) / 2, ua = (r0 - ov) / 2, ub = (r1 + ov) / 2;
+      const e00 = W3(r0 - ov, w0 - ov, eY), e10 = W3(r1 + ov, w0 - ov, eY), e11 = W3(r1 + ov, w1 + ov, eY), e01 = W3(r0 - ov, w1 + ov, eY);
+      const R0 = W3(r0 - ov, wm, Hr), R1 = W3(r1 + ov, wm, Hr);
+      tri(RB, e00, e10, R1, roofC, [ua, 0], [ub, 0], [ub, sl]); tri(RB, e00, R1, R0, roofC, [ua, 0], [ub, sl], [ua, sl]);
+      tri(RB, e01, R0, R1, roofC, [ua, 0], [ua, sl], [ub, sl]); tri(RB, e01, R1, e11, roofC, [ua, 0], [ub, sl], [ub, 0]);
+      for (const r of [r0, r1]) tri(WB, W3(r, w0, yT), W3(r, w1, yT), W3(r, wm, Hr), wallC, PLAIN, PLAIN, PLAIN);
+    } else {
+      const v2 = ring.map(p => new THREE.Vector2(p[0], p[1]));
+      let tris = []; try { tris = THREE.ShapeUtils.triangulateShape(v2, []); } catch (e) {}
+      for (const [i0, i1, i2] of tris) tri(RB, [ring[i0][0], yT, ring[i0][1]], [ring[i1][0], yT, ring[i1][1]], [ring[i2][0], yT, ring[i2][1]], roofC, [ring[i0][0] / 2, ring[i0][1] / 2], [ring[i1][0] / 2, ring[i1][1] / 2], [ring[i2][0] / 2, ring[i2][1] / 2]);
+    }
+    let minx = 1e9, maxx = -1e9, minz = 1e9, maxz = -1e9;
+    for (const p of ring) { minx = Math.min(minx, p[0]); maxx = Math.max(maxx, p[0]); minz = Math.min(minz, p[1]); maxz = Math.max(maxz, p[1]); }
+    const rec = { ring, minx, maxx, minz, maxz };
+    for (let gx = Math.floor((minx - 1) / BG); gx <= Math.floor((maxx + 1) / BG); gx++) for (let gz = Math.floor((minz - 1) / BG); gz <= Math.floor((maxz + 1) / BG); gz++) {
+      const k = gx * 100000 + gz; if (!bGrid.has(k)) bGrid.set(k, []); bGrid.get(k).push(rec);
+    }
+  }
+  const grp = new THREE.Group();
+  for (const k of ['plaster', 'wood', 'brick', 'roof']) {
+    const d = B[k]; if (!d.P.length) continue;
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(d.P, 3)); g.setAttribute('normal', new THREE.Float32BufferAttribute(d.N, 3));
+    g.setAttribute('color', new THREE.Float32BufferAttribute(d.C, 3)); g.setAttribute('uv', new THREE.Float32BufferAttribute(d.U, 2));
+    g.computeBoundingSphere();
+    grp.add(new THREE.Mesh(g, new THREE.MeshLambertMaterial({ vertexColors: true, map: TEX[k], side: THREE.DoubleSide })));
+  }
+  return grp;
+}
+
+/* ---------- puud ---------- */
+const NI = g => g.index ? g.toNonIndexed() : g;
+const mergeG = list => mergeGeometries(list.map(NI));
+const TREE = {
+  spruce: { trunk: new THREE.CylinderGeometry(0.12, 0.22, 2.4, 6).translate(0, 1.2, 0), crown: mergeG([new THREE.ConeGeometry(1.7, 3.4, 8).translate(0, 2.9, 0), new THREE.ConeGeometry(1.3, 3.0, 8).translate(0, 4.6, 0), new THREE.ConeGeometry(0.85, 2.6, 8).translate(0, 6.2, 0)]),
+    far: mergeG([new THREE.ConeGeometry(1.6, 6.4, 5).translate(0, 4.2, 0), new THREE.CylinderGeometry(0.15, 0.2, 1.2, 3).translate(0, 0.6, 0)]) },
+  pine: { trunk: new THREE.CylinderGeometry(0.12, 0.2, 8, 6).translate(0, 4, 0), crown: mergeG([new THREE.IcosahedronGeometry(1.6, 1).scale(1.25, 0.7, 1.25).translate(0, 8.3, 0), new THREE.IcosahedronGeometry(1.1, 0).translate(0.7, 7.5, 0.3)]),
+    far: mergeG([new THREE.IcosahedronGeometry(1.8, 0).scale(1.2, 0.7, 1.2).translate(0, 8.1, 0), new THREE.CylinderGeometry(0.15, 0.2, 7, 3).translate(0, 3.5, 0)]) },
+  broad: { trunk: new THREE.CylinderGeometry(0.12, 0.2, 3.6, 6).translate(0, 1.8, 0), crown: mergeG([new THREE.IcosahedronGeometry(1.7, 1).translate(0, 4.6, 0), new THREE.IcosahedronGeometry(1.3, 1).translate(0.9, 4.1, 0.4), new THREE.IcosahedronGeometry(1.2, 1).translate(-0.7, 4.3, -0.5)]),
+    far: mergeG([new THREE.IcosahedronGeometry(2.1, 0).translate(0, 4.5, 0), new THREE.CylinderGeometry(0.15, 0.2, 2.6, 3).translate(0, 1.3, 0)]) },
+  bush: { trunk: null, crown: new THREE.IcosahedronGeometry(1, 1).scale(1.2, 0.8, 1.2).translate(0, 0.55, 0), far: new THREE.IcosahedronGeometry(1, 0).scale(1.2, 0.8, 1.2).translate(0, 0.55, 0) }
+};
+TREE.birch = { trunk: new THREE.CylinderGeometry(0.1, 0.15, 4.2, 6).translate(0, 2.1, 0), crown: TREE.broad.crown, far: TREE.broad.far };
+const TMAT = {
+  trunk: new THREE.MeshLambertMaterial({ color: 0x5a3d26 }), birchT: new THREE.MeshLambertMaterial({ color: 0xe9e5dc }),
+  spruce: new THREE.MeshLambertMaterial({ color: 0x2f5f36, flatShading: true }), pine: new THREE.MeshLambertMaterial({ color: 0x3f6d39, flatShading: true }),
+  broad: new THREE.MeshLambertMaterial({ color: 0x5c9a3c, flatShading: true }), birch: new THREE.MeshLambertMaterial({ color: 0x7db04a, flatShading: true }),
+  bush: new THREE.MeshLambertMaterial({ color: 0x527c37, flatShading: true })
+};
+const TYPES = ['spruce', 'pine', 'broad', 'birch', 'bush'];
+function instancedFrom(geo, mat, arr, tint){
+  const n = arr.length / 4, m = new THREE.InstancedMesh(geo, mat, n);
+  const M = new THREE.Matrix4(), q = new THREE.Quaternion(), p = new THREE.Vector3(), sc = new THREE.Vector3(), c = new THREE.Color();
+  for (let i = 0; i < n; i++) {
+    const x = arr[i * 4], z = arr[i * 4 + 1];
+    p.set(x, heightAt(x, z) - 0.1, z); q.setFromAxisAngle(UP, arr[i * 4 + 3]); sc.setScalar(arr[i * 4 + 2]); M.compose(p, q, sc); m.setMatrixAt(i, M);
+    if (tint) { const v = 0.78 + hash(i * 7 + Math.floor(x * 13)) * 0.42; c.setRGB(v, v * (0.95 + hash(i) * 0.1), v * 0.9); m.setColorAt(i, c); }
+  }
+  m.instanceMatrix.needsUpdate = true; if (m.instanceColor) m.instanceColor.needsUpdate = true; m.frustumCulled = false;
+  return m;
+}
+const CH = 128, chunkData = new Map(), chunkMesh = new Map();
+const chunkKey = (x, z) => Math.floor((x + HALF_W) / CH) * 1000 + Math.floor((z + HALF_H) / CH);
+function addTree(type, x, z, s){ const k = chunkKey(x, z); let d = chunkData.get(k); if (!d) { d = { spruce: [], pine: [], broad: [], birch: [], bush: [] }; chunkData.set(k, d); } d[type].push(x, z, s, srand() * 6.28); }
+function buildChunk(key, far){
+  const d = chunkData.get(key), g = new THREE.Group();
+  for (const ty of TYPES) {
+    const arr = d[ty]; if (!arr.length) continue;
+    if (far) { g.add(instancedFrom(TREE[ty].far, TMAT[ty], arr, true)); continue; }
+    if (TREE[ty].trunk) g.add(instancedFrom(TREE[ty].trunk, ty === 'birch' ? TMAT.birchT : TMAT.trunk, arr, false));
+    g.add(instancedFrom(TREE[ty].crown, TMAT[ty], arr, true));
+  }
+  kehra.add(g);
+  let e = chunkMesh.get(key); if (!e) { e = {}; chunkMesh.set(key, e); }
+  e[far ? 'far' : 'near'] = g; return g;
+}
+let shownChunks = new Set(), chunkTimer = 0;
+const NEAR_R = 125;
+function updateChunks(force = false){
+  camera.getWorldPosition(head);
+  const R = 250, kx0 = Math.floor((head.x + HALF_W) / CH), kz0 = Math.floor((head.z + HALF_H) / CH), rr = Math.ceil(R / CH) + 1;
+  const now = new Set(); let built = 0;
+  for (let kx = kx0 - rr; kx <= kx0 + rr; kx++) for (let kz = kz0 - rr; kz <= kz0 + rr; kz++) {
+    const cx = kx * CH + CH / 2 - HALF_W, cz = kz * CH + CH / 2 - HALF_H, dist = Math.hypot(cx - head.x, cz - head.z);
+    if (dist > R + CH * 0.71) continue;
+    const key = kx * 1000 + kz; if (!chunkData.has(key)) continue;
+    const e = chunkMesh.get(key) || {}, wantNear = dist < NEAR_R + CH * 0.5;
+    let g = wantNear ? e.near : e.far;
+    if (!g) { if (!force && built >= 3) { g = wantNear ? e.far : e.near; if (!g) continue; } else { g = buildChunk(key, !wantNear); built++; } }
+    const e2 = chunkMesh.get(key);
+    if (e2.near) e2.near.visible = g === e2.near;
+    if (e2.far) e2.far.visible = g === e2.far;
+    now.add(key);
+  }
+  for (const k of shownChunks) if (!now.has(k)) { const e = chunkMesh.get(k); if (e) { if (e.near) e.near.visible = false; if (e.far) e.far.visible = false; } }
+  shownChunks = now;
+}
+
+/* ---------- muru mängija ümber ---------- */
+const grassTex = (() => {
+  const c = document.createElement('canvas'); c.width = 64; c.height = 64; const x = c.getContext('2d');
+  for (let i = 0; i < 26; i++) { const bx = 4 + Math.random() * 56, h = 30 + Math.random() * 32, lean = (Math.random() - 0.5) * 14; x.strokeStyle = `hsl(${85 + Math.random() * 25},${45 + Math.random() * 20}%,${30 + Math.random() * 22}%)`; x.lineWidth = 2 + Math.random() * 2; x.beginPath(); x.moveTo(bx, 64); x.quadraticCurveTo(bx + lean * 0.3, 64 - h * 0.6, bx + lean, 64 - h); x.stroke(); }
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+})();
+const GRASS_N = 3000;
+const grassGeo = mergeG([new THREE.PlaneGeometry(0.7, 0.45).translate(0, 0.22, 0), new THREE.PlaneGeometry(0.7, 0.45).translate(0, 0.22, 0).rotateY(Math.PI / 2)]);
+const grassMesh = new THREE.InstancedMesh(grassGeo, new THREE.MeshLambertMaterial({ map: grassTex, alphaTest: 0.5, side: THREE.DoubleSide }), GRASS_N);
+grassMesh.frustumCulled = false; grassMesh.count = 0;
+let grassAt0 = new THREE.Vector3(1e9, 0, 1e9);
+function updateGrass(force){
+  camera.getWorldPosition(head);
+  if (!force && Math.hypot(head.x - grassAt0.x, head.z - grassAt0.z) < 8) return;
+  grassAt0.copy(head);
+  const M = new THREE.Matrix4(), q = new THREE.Quaternion(), p = new THREE.Vector3(), s = new THREE.Vector3(), c = new THREE.Color();
+  let n = 0, tries = 0;
+  while (n < GRASS_N && tries++ < GRASS_N * 3) {
+    const a = rand() * Math.PI * 2, r = Math.sqrt(rand()) * 30, x = head.x + Math.cos(a) * r, z = head.z + Math.sin(a) * r;
+    const g = grassAt(x, z); if (g < 60 || rand() * 255 > g) continue;
+    p.set(x, heightAt(x, z), z); q.setFromAxisAngle(UP, rand() * 3.14); const k = 0.6 + rand() * 0.8; s.set(k, k * (0.7 + rand() * 0.6), k);
+    M.compose(p, q, s); grassMesh.setMatrixAt(n, M); const v = 0.8 + rand() * 0.4; c.setRGB(v, v, v * 0.9); grassMesh.setColorAt(n, c); n++;
+  }
+  grassMesh.count = n; grassMesh.instanceMatrix.needsUpdate = true; if (grassMesh.instanceColor) grassMesh.instanceColor.needsUpdate = true;
+}
+
+/* ---------- maapinna detail ---------- */
+const detailTex = (() => {
+  const S = 256, c = document.createElement('canvas'); c.width = c.height = S; const x = c.getContext('2d'), img = x.createImageData(S, S);
+  const r2 = mulberry32(7), coarse = [];
+  for (let i = 0; i < 16 * 16; i++) coarse.push(r2());
+  for (let y = 0; y < S; y++) for (let X = 0; X < S; X++) {
+    const fx = X / S * 16, fy = y / S * 16, ix = Math.floor(fx), iy = Math.floor(fy), tx = fx - ix, ty = fy - iy;
+    const g = (a, b) => coarse[((b % 16) * 16) + (a % 16)];
+    const v = THREE.MathUtils.lerp(THREE.MathUtils.lerp(g(ix, iy), g(ix + 1, iy), tx), THREE.MathUtils.lerp(g(ix, iy + 1), g(ix + 1, iy + 1), tx), ty);
+    const i = (y * S + X) * 4; img.data[i] = 90 + r2() * 165; img.data[i + 1] = v * 255; img.data[i + 2] = 0; img.data[i + 3] = 255;
+  }
+  x.putImageData(img, 0, 0);
+  const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.anisotropy = 8; return t;
+})();
+const waterNormal = (() => {
+  const S = 128, c = document.createElement('canvas'); c.width = c.height = S; const x = c.getContext('2d'), img = x.createImageData(S, S);
+  for (let y = 0; y < S; y++) for (let X = 0; X < S; X++) {
+    const a = Math.sin(X / S * Math.PI * 6 + Math.sin(y / S * Math.PI * 4) * 1.5), b = Math.cos(y / S * Math.PI * 8 + Math.sin(X / S * Math.PI * 2) * 2);
+    const i = (y * S + X) * 4; img.data[i] = 128 + a * 50; img.data[i + 1] = 128 + b * 50; img.data[i + 2] = 255; img.data[i + 3] = 255;
+  }
+  x.putImageData(img, 0, 0);
+  const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(MW / 12, MD / 12); return t;
+})();
+
+/* ---------- maailma ehitus ---------- */
+const kehra = new THREE.Group(); kehra.visible = false; scene.add(kehra);
+kehra.add(grassMesh);
+let kehraReady = false, PLACES = [], waterMat = null;
+const SUN_SH = [-0.575, 0.818], SUN_L = 1.26;   // varju suund ja pikkus kõrguse meetri kohta
+const tick = () => new Promise(r => setTimeout(r, 15));
+const isBigWater = w => ['river', 'canal'].includes(w.type) || w.width >= 5;
+function drawShadows(c, T){
+  // puude varjud
+  c.fillStyle = 'rgba(10,20,5,0.2)'; c.beginPath();
+  const W = c.canvas.width, H = c.canvas.height;
+  for (const d of chunkData.values()) for (const ty of TYPES) {
+    const a = d[ty], hgtM = ty === 'bush' ? 1.2 : ty === 'pine' ? 9 : 7, rad = ty === 'bush' ? 1.1 : 1.6;
+    for (let i = 0; i < a.length; i += 4) {
+      const s = a[i + 2], off = hgtM * s * SUN_L * 0.55, X = (a[i] + SUN_SH[0] * off - T.x0) * T.s, Y = (a[i + 1] + SUN_SH[1] * off - T.z0) * T.s;
+      if (X < -10 || Y < -10 || X > W + 10 || Y > H + 10) continue;
+      const r = Math.max(0.8, rad * s * T.s); c.moveTo(X + r, Y); c.ellipse(X, Y, r, r * 1.35, 0, 0, Math.PI * 2);
+    }
+  }
+  c.fill();
+  // majade varjud ja "kontaktvari"
+  for (const b of F.buildings) {
+    if (!b.ok) continue;
+    const len = (b.H + (b.gabled ? 1.8 : 0)) * SUN_L;
+    c.fillStyle = 'rgba(0,0,0,0.075)';
+    for (let k = 1; k <= 6; k++) { const o = len * k / 6; pathRings(c, [b.ring], { x0: T.x0 - SUN_SH[0] * o, z0: T.z0 - SUN_SH[1] * o, s: T.s }); c.fill(); }
+    pathRings(c, [b.ring], T); c.strokeStyle = 'rgba(0,0,0,0.3)'; c.lineWidth = 1.6 * T.s; c.stroke();
+  }
+}
+async function initKehra(){
+  let res;
+  try { res = await loadOSM(); }
+  catch (e) { console.error(e); setLoad('⚠️ OpenStreetMapi andmeid ei saanud laadida (internet või server hõivatud). Proovi hiljem uuesti või pane kausta fail <b>kehra_osm.json</b>.'); drawTable(); return; }
+  setLoad('Ehitan Kehra 3D maailma… (1/5 andmed)'); await tick();
+  processOSM(res.data);
+  if (!res.fromFile) {
+    try { const blob = new Blob([JSON.stringify(res.data)], { type: 'application/json' }); const url = URL.createObjectURL(blob);
+      document.getElementById('savelink').innerHTML = `💾 <a href="${url}" download="kehra_osm.json">Salvesta kehra_osm.json</a> – pane see index.html kõrvale, siis laeb kiiresti ja ilma internetita.`; } catch (e) {}
+  }
+  // maskid
+  setLoad('Ehitan Kehra 3D maailma… (2/5 mets ja vesi)'); await tick();
+  const forestM = maskFrom((c, T) => {
+    for (const a of F.areas) {
+      let v = 0;
+      if (a.kind === 'forest') v = a.leaf === 'needleleaved' ? 250 : a.leaf === 'broadleaved' ? 120 : 190;
+      else if (a.kind === 'scrub') v = 60; else if (a.kind === 'wetland') v = 40;
+      pathRings(c, a.rings, T); c.fillStyle = `rgb(${v},${v},${v})`; c.fill('evenodd');
+    }
+    c.lineCap = 'round'; c.strokeStyle = '#000';
+    for (const r of F.roads) { pathLine(c, r.pts, T); c.lineWidth = (roadW(r) + 2) * T.s; c.stroke(); }
+    for (const r of F.rails) { pathLine(c, r.pts, T); c.lineWidth = 12 * T.s; c.stroke(); }
+    for (const w of F.waterways) { pathLine(c, w.pts, T); c.lineWidth = (waterW(w) + 2) * T.s; c.stroke(); }
+    c.fillStyle = '#000'; for (const b of F.buildings) { pathRings(c, [b.ring], T); c.fill(); }
+  });
+  const waterM = maskFrom((c, T) => {
+    c.fillStyle = '#fff'; for (const a of F.areas) if (a.kind === 'water') { pathRings(c, a.rings, T); c.fill('evenodd'); }
+    c.lineCap = 'round'; c.strokeStyle = '#fff';
+    for (const w of F.waterways) { if (w.tunnel || !isBigWater(w)) continue; pathLine(c, w.pts, T); c.lineWidth = Math.max(1, waterW(w) * T.s); c.stroke(); }
+    c.strokeStyle = '#000';
+    for (const r of F.roads) if (r.bridge) { pathLine(c, r.pts, T); c.lineWidth = (roadW(r) + 1.5) * T.s; c.stroke(); }
+    for (const r of F.rails) if (r.bridge) { pathLine(c, r.pts, T); c.lineWidth = 6 * T.s; c.stroke(); }
+  });
+  const grassM = maskFrom((c, T) => {
+    c.fillStyle = '#a0a0a0'; c.fillRect(0, 0, GW, GH);
+    const GV = { grass: 255, residential: 200, allotments: 170, cemetery: 200, pitch: 120, farmland: 60, forest: 70, scrub: 150, wetland: 200, industrial: 20, parking: 0, track: 0, sand: 0, water: 0 };
+    for (const a of F.areas) { const v = GV[a.kind] ?? 150; pathRings(c, a.rings, T); c.fillStyle = `rgb(${v},${v},${v})`; c.fill('evenodd'); }
+    c.lineCap = 'round'; c.strokeStyle = '#000';
+    for (const r of F.roads) { pathLine(c, r.pts, T); c.lineWidth = (roadW(r) + 0.5) * T.s; c.stroke(); }
+    for (const r of F.rails) { pathLine(c, r.pts, T); c.lineWidth = 6 * T.s; c.stroke(); }
+    for (const w of F.waterways) { pathLine(c, w.pts, T); c.lineWidth = waterW(w) * T.s; c.stroke(); }
+    c.fillStyle = '#000'; for (const b of F.buildings) { pathRings(c, [b.ring], T); c.fill(); }
+  });
+  forestG = forestM.arr; waterG = waterM.arr; grassG = grassM.arr;
+
+  // maastik, sillad, majade andmed
+  setLoad('Ehitan Kehra 3D maailma… (3/5 maastik)'); await tick();
+  buildHeights(); prepBridges(); prepBuildings();
+
+  // puud (enne maapinda, et varjud saaks maale joonistada)
+  for (let gz = 0; gz < GH; gz++) for (let gx = 0; gx < GW; gx++) {
+    const v = forestG[gz * GW + gx]; if (v < 30) continue;
+    const dens = v >= 100 ? 0.11 : v >= 50 ? 0.035 : 0.014;
+    if (srand() > dens) continue;
+    const x = (gx + srand()) * GR - HALF_W, z = (gz + srand()) * GR - HALF_H;
+    let type;
+    if (v < 50) type = srand() < 0.6 ? 'bush' : 'birch';
+    else if (v < 100) type = srand() < 0.7 ? 'bush' : 'broad';
+    else if (v < 150) type = srand() < 0.35 ? 'birch' : 'broad';
+    else if (v < 220) { const r = srand(); type = r < 0.4 ? 'spruce' : r < 0.6 ? 'pine' : r < 0.8 ? 'birch' : 'broad'; }
+    else type = srand() < 0.65 ? 'spruce' : 'pine';
+    addTree(type, x, z, type === 'bush' ? 0.7 + srand() * 0.8 : 1.35 + srand() * 0.85);
+  }
+  for (const [x, z] of F.trees) if (Math.abs(x) < HALF_W && Math.abs(z) < HALF_H) addTree(srand() < 0.5 ? 'broad' : 'birch', x, z, 1.4 + srand() * 0.5);
+  setLoad('Ehitan Kehra 3D maailma… (4/5 majad)'); await tick();
+  kehra.add(buildBuildings());
+  const br = buildBridges(); if (br) kehra.add(br);
+  for (let i = 0; i < 7000; i++) {
+    const x = (srand() * 2 - 1) * HALF_W, z = (srand() * 2 - 1) * HALF_H, g = grassAt(x, z);
+    if (g > 190 && g < 210 && !isWater(x, z) && !inBuilding(x, z, 3) && forestAt(x, z) < 30) addTree(srand() < 0.6 ? 'broad' : 'bush', x, z, srand() < 0.6 ? 0.9 + srand() * 0.5 : 0.8);
+  }
+
+  // maapind 2 × 2 plaati (~0,8 m piksli kohta) koos varjudega
+  setLoad('Ehitan Kehra 3D maailma… (5/5 maapind ja varjud)'); await tick();
+  const TW = MW / 2, TD = MD / 2, TPX = 2048;
+  for (let ty = 0; ty < 2; ty++) for (let tx = 0; tx < 2; tx++) {
+    const x0 = -HALF_W + tx * TW, z0 = -HALF_H + ty * TD;
+    const gc = document.createElement('canvas'); gc.width = TPX; gc.height = Math.round(TPX * TD / TW);
+    const gctx = gc.getContext('2d'), T = { x0, z0, s: TPX / TW };
+    drawGround(gctx, T); drawShadows(gctx, T);
+    const gtex = new THREE.CanvasTexture(gc); gtex.colorSpace = THREE.SRGBColorSpace; gtex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+    const gmat = new THREE.MeshLambertMaterial({ map: gtex });
+    gmat.onBeforeCompile = sh => {
+      sh.uniforms.detailMap = { value: detailTex };
+      sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nvarying vec3 vWP;').replace('#include <worldpos_vertex>', '#include <worldpos_vertex>\nvWP = (modelMatrix * vec4(transformed, 1.0)).xyz;');
+      sh.fragmentShader = sh.fragmentShader.replace('#include <common>', '#include <common>\nvarying vec3 vWP;\nuniform sampler2D detailMap;')
+        .replace('#include <map_fragment>', '#include <map_fragment>\nfloat dA = texture2D(detailMap, vWP.xz * 0.45).r; float dB = texture2D(detailMap, vWP.xz * 0.031).g;\ndiffuseColor.rgb *= (0.74 + 0.45 * dA) * (0.86 + 0.28 * dB);');
+    };
+    const geo = new THREE.PlaneGeometry(TW, TD, 220, Math.round(220 * TD / TW)).rotateX(-Math.PI / 2).translate(x0 + TW / 2, 0, z0 + TD / 2);
+    const pos = geo.attributes.position;
+    for (let i = 0; i < pos.count; i++) pos.setY(i, heightAt(pos.getX(i), pos.getZ(i)));
+    geo.computeVertexNormals();
+    kehra.add(new THREE.Mesh(geo, gmat));
+    await tick();
+  }
+  const outer = new THREE.Mesh(new THREE.PlaneGeometry(12000, 12000).rotateX(-Math.PI / 2), new THREE.MeshLambertMaterial({ color: 0x627a46 }));
+  outer.position.y = -0.15; kehra.add(outer);
+
+  // vesi orus
+  const wtex = new THREE.CanvasTexture(waterM.canvas);
+  waterMat = new THREE.MeshPhongMaterial({ color: 0x2c4c62, specular: 0xd6e6f2, shininess: 90, alphaMap: wtex, alphaTest: 0.5, normalMap: waterNormal, normalScale: new THREE.Vector2(0.35, 0.35) });
+  const water = new THREE.Mesh(new THREE.PlaneGeometry(MW, MD).rotateX(-Math.PI / 2), waterMat);
+  water.position.y = WATER_Y; kehra.add(water);
+
+  // kohanimed
+  const prio = { suburb: 0, quarter: 0, neighbourhood: 0, town: 1, village: 1, hamlet: 1, isolated_dwelling: 2, locality: 2, landmark: 3 };
+  const seen = new Set();
+  PLACES = F.places.filter(p => Math.abs(p.x) < HALF_W - 150 && Math.abs(p.z) < HALF_H - 150 && !seen.has(p.name) && seen.add(p.name))
+    .sort((a, b) => (prio[a.kind] ?? 2) - (prio[b.kind] ?? 2)).slice(0, 8);
+  const extra = [['Kesklinn', 0, 0], ['Põhjaosa', 0, -1100], ['Lõunaosa', 0, 1100], ['Idaosa', 1000, 0], ['Lääneosa', -1000, 0]];
+  for (const [name, x, z] of extra) if (PLACES.length < 6) PLACES.push({ name, x, z, kind: 'auto' });
+  if (PLACES.length) { sel.cx = PLACES[0].x; sel.cz = PLACES[0].z; sel.name = PLACES[0].name; }
+  buildPresetButtons();
+  kehraReady = true; overviewCache = null;
+  setLoad(`Kehra laetud ✓ (${F.buildings.length} maja, ${F.roads.length} teed/rada, ${bridges.length} silda)`);
+  drawTable(); drawSelInfo();
+}
+initKehra();
+
+/* ---------- kontrollpunktid ---------- */
+const flagTex = (() => { const c = document.createElement('canvas'); c.width = c.height = 128; const x = c.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, 128, 128); x.fillStyle = '#ff6a00'; x.beginPath(); x.moveTo(0, 0); x.lineTo(128, 0); x.lineTo(128, 128); x.closePath(); x.fill(); const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t; })();
+const flagMat = new THREE.MeshLambertMaterial({ map: flagTex }), postMat = new THREE.MeshLambertMaterial({ color: 0x777777 });
+const flagGeo = new THREE.BoxGeometry(0.3, 0.3, 0.3), postGeo = new THREE.CylinderGeometry(0.025, 0.025, 1.3, 6).translate(0, 0.65, 0);
+[flagMat, postMat, flagGeo, postGeo].forEach(o => SHARED.add(o));
+function makeKP(num){
+  const g = new THREE.Group();
+  g.add(new THREE.Mesh(postGeo, postMat));
+  const f = new THREE.Mesh(flagGeo, flagMat); f.position.y = 1.15; f.rotation.y = Math.PI / 4; g.add(f);
+  const lbl = new CanvasPlane(0.22, 0.14, 400);
+  lbl.mesh.material.fog = true;
+  lbl.draw((c, W, H) => { c.fillStyle = '#fff'; c.fillRect(0, 0, W, H); c.fillStyle = '#111'; c.font = `bold ${H * 0.7}px ${FONT}`; c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillText(String(num), W / 2, H * 0.55); });
+  lbl.mesh.position.set(0, 0.8, 0.03); g.add(lbl.mesh);
+  const back = lbl.mesh.clone(); back.rotation.y = Math.PI; back.position.z = -0.03; g.add(back);
+  return g;
+}
+const kpGroup = new THREE.Group(); kehra.add(kpGroup);
+const gate = new THREE.Group(); kehra.add(gate);
+{
+  const postG = new THREE.CylinderGeometry(0.05, 0.05, 2.6, 8).translate(0, 1.3, 0);
+  for (const x of [-0.9, 0.9]) { const p = new THREE.Mesh(postG, TMAT.trunk); p.position.x = x; gate.add(p); }
+  const b = new CanvasPlane(1.9, 0.45, 300);
+  b.draw((c, W, H) => { c.fillStyle = '#c2008a'; c.fillRect(0, 0, W, H); c.fillStyle = '#fff'; c.font = `bold ${H * 0.55}px ${FONT}`; c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillText('START • FINIŠ', W / 2, H / 2); });
+  b.mesh.position.y = 2.35; gate.add(b.mesh);
+  const back = b.mesh.clone(); back.rotation.y = Math.PI; gate.add(back);
+}
+
+/* =========================================================
+   ORIENTEERUMINE
+   ========================================================= */
+let course = [], startPt = { x: 0, z: 0 }, nextKP = 0, elapsed = 0, finished = true, mapTimer = 0, paused = false;
+const sel = { cx: 0, cz: 0, size: 700, full: false, diff: 'kerge', name: 'Kesklinn' };
+function selRect(){
+  if (sel.full) return { x0: -HALF_W, z0: -HALF_H, x1: HALF_W, z1: HALF_H };
+  const h = sel.size / 2, cx = THREE.MathUtils.clamp(sel.cx, -HALF_W + h, HALF_W - h), cz = THREE.MathUtils.clamp(sel.cz, -HALF_H + h, HALF_H - h);
+  return { x0: cx - h, z0: cz - h, x1: cx + h, z1: cz + h };
+}
+function validPt(x, z){ return !isWater(x, z) && !inBuilding(x, z, 2) && Math.abs(x) < HALF_W - 5 && Math.abs(z) < HALF_H - 5; }
+function genCourse(r, n){
+  const S = Math.min(r.x1 - r.x0, r.z1 - r.z0), m = S * 0.05, cx = (r.x0 + r.x1) / 2, cz = (r.z0 + r.z1) / 2;
+  let start = { x: cx, z: cz };
+  outer: for (let rad = 0; rad < S / 2; rad += 4) for (let k = 0; k < 16; k++) { const x = cx + Math.cos(k * 0.39) * rad, z = cz + Math.sin(k * 0.39) * rad; if (validPt(x, z)) { start = { x, z }; break outer; } }
+  const minLeg = S * (sel.full ? 0.08 : 0.13), maxLeg = S * (sel.full ? 0.25 : 0.45);
+  let best = [];
+  for (let attempt = 0; attempt < 80; attempt++) {
+    const pts = []; let tries = 0;
+    while (pts.length < n && tries++ < 3000) {
+      const x = THREE.MathUtils.lerp(r.x0 + m, r.x1 - m, rand()), z = THREE.MathUtils.lerp(r.z0 + m, r.z1 - m, rand());
+      if (!validPt(x, z)) continue;
+      const prev = pts.length ? pts[pts.length - 1] : start, leg = Math.hypot(x - prev.x, z - prev.z);
+      if (leg < minLeg || leg > maxLeg) continue;
+      if (pts.some(p => Math.hypot(p.x - x, p.z - z) < minLeg * 0.8) || Math.hypot(x - start.x, z - start.z) < minLeg * 0.6) continue;
+      pts.push({ x, z });
+    }
+    if (pts.length > best.length) best = pts;
+    if (best.length === n) break;
+  }
+  return { start, pts: best };
+}
+
+/* ---------- kaart käes ---------- */
+let mapPanel = null, mapBase = null, mapR = null, mapT = null, mapMode = 0;
+const mapHolder = new THREE.Group();
+const MAP_CW = 640, MAP_INFO = 110;
+function placeMap(){
+  if (mapMode === 1 || !leftGrip) {
+    camera.add(mapHolder);
+    if (mapMode === 1) { mapHolder.position.set(0, -0.08, -0.7); mapHolder.scale.setScalar(2.3); }
+    else { mapHolder.position.set(-0.2, -0.17, -0.5); mapHolder.scale.setScalar(1); }
+    mapHolder.rotation.set(0, 0, 0);
+  } else { leftGrip.add(mapHolder); mapHolder.position.set(0, 0.11, 0.02); mapHolder.rotation.set(-0.6, 0, 0); mapHolder.scale.setScalar(1); }
+}
+function toggleMap(){ if (state !== 'forest' || paused) return; mapMode = (mapMode + 1) % 3; placeMap(); mapTimer = 1; }
+const w2map = (x, z) => [(x - mapT.x0) * mapT.s, (z - mapT.z0) * mapT.s];
+function buildMap(r){
+  const pad = (r.x1 - r.x0) * 0.06;
+  mapR = { x0: Math.max(-HALF_W, r.x0 - pad), z0: Math.max(-HALF_H, r.z0 - pad), x1: Math.min(HALF_W, r.x1 + pad), z1: Math.min(HALF_H, r.z1 + pad) };
+  mapT = { x0: mapR.x0, z0: mapR.z0, s: MAP_CW / (mapR.x1 - mapR.x0) };
+  const mh = Math.round((mapR.z1 - mapR.z0) * mapT.s);
+  mapBase = document.createElement('canvas'); mapBase.width = MAP_CW; mapBase.height = mh;
+  const c = mapBase.getContext('2d');
+  drawOMap(c, mapT, MAP_CW, mh);
+  const R = 13; c.strokeStyle = '#d4008f'; c.fillStyle = '#d4008f'; c.lineWidth = 3;
+  const pts = [startPt, ...course, startPt];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const [x1, y1] = w2map(pts[i].x, pts[i].z), [x2, y2] = w2map(pts[i + 1].x, pts[i + 1].z);
+    const dx = x2 - x1, dy = y2 - y1, L = Math.hypot(dx, dy), r1 = i === 0 ? R + 2 : R, r2 = i + 1 === pts.length - 1 ? R + 3 : R;
+    if (L < r1 + r2) continue;
+    c.beginPath(); c.moveTo(x1 + dx / L * r1, y1 + dy / L * r1); c.lineTo(x2 - dx / L * r2, y2 - dy / L * r2); c.stroke();
+  }
+  const [sx, sy] = w2map(startPt.x, startPt.z);
+  c.beginPath(); for (let k = 0; k < 3; k++) { const a = -Math.PI / 2 + k * 2 * Math.PI / 3; c.lineTo(sx + Math.cos(a) * 15, sy + Math.sin(a) * 15); } c.closePath(); c.stroke();
+  c.beginPath(); c.arc(sx, sy, 11, 0, 7); c.stroke(); c.beginPath(); c.arc(sx, sy, 16, 0, 7); c.stroke();
+  course.forEach((p, i) => {
+    const [x, y] = w2map(p.x, p.z);
+    c.beginPath(); c.arc(x, y, R, 0, 7); c.stroke();
+    c.font = `bold 22px ${FONT}`; c.textAlign = 'left'; c.textBaseline = 'middle';
+    c.lineWidth = 5; c.strokeStyle = '#fff'; c.strokeText(String(i + 1), x + R + 2, y - R);
+    c.fillText(String(i + 1), x + R + 2, y - R); c.strokeStyle = '#d4008f'; c.lineWidth = 3;
+  });
+  let len = 100; for (const L of [50, 100, 200, 500, 1000]) if (L * mapT.s < 170) len = L;
+  c.fillStyle = 'rgba(255,255,255,.9)'; c.fillRect(8, mh - 40, len * mapT.s + 70, 32);
+  c.fillStyle = '#000'; c.fillRect(14, mh - 18, len * mapT.s, 5);
+  c.font = `bold 16px ${FONT}`; c.textAlign = 'left'; c.fillText(`${len} m`, 20 + len * mapT.s, mh - 18);
+  if (mapPanel) { mapHolder.remove(mapPanel.mesh); disposeTree(mapPanel.mesh); }
+  const ppm = MAP_CW / 0.3;
+  mapPanel = new CanvasPlane(0.3, (mh + MAP_INFO) / ppm, ppm);
+  mapHolder.add(mapPanel.mesh);
+}
+function updateMapPanel(){
+  mapPanel.draw((c, W, H) => {
+    const mh = mapBase.height;
+    c.drawImage(mapBase, 0, 0);
+    camera.getWorldPosition(head); camera.getWorldDirection(fwd);
+    const ang = Math.atan2(fwd.z, fwd.x);
+    if (sel.diff === 'kerge') {
+      const [px, py] = w2map(head.x, head.z);
+      c.save(); c.translate(px, py); c.rotate(ang); c.fillStyle = '#e53935'; c.strokeStyle = '#fff'; c.lineWidth = 2;
+      c.beginPath(); c.moveTo(15, 0); c.lineTo(-9, -9); c.lineTo(-9, 9); c.closePath(); c.fill(); c.stroke(); c.restore();
+    }
+    const cx = W - 46, cy = 46;
+    c.fillStyle = 'rgba(255,255,255,.95)'; c.beginPath(); c.arc(cx, cy, 38, 0, 7); c.fill(); c.strokeStyle = '#333'; c.lineWidth = 2; c.stroke();
+    c.fillStyle = '#1565c0'; c.font = `bold 18px ${FONT}`; c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillText('N', cx, cy - 26);
+    c.save(); c.translate(cx, cy); c.rotate(ang); c.fillStyle = '#e53935'; c.beginPath(); c.moveTo(28, 0); c.lineTo(4, -7); c.lineTo(4, 7); c.closePath(); c.fill(); c.fillStyle = '#555'; c.fillRect(-15, -2, 19, 4); c.restore();
+    c.fillStyle = '#1b2a1b'; c.fillRect(0, mh, W, H - mh);
+    c.fillStyle = '#fff'; c.textAlign = 'left'; c.textBaseline = 'middle'; c.font = `bold 32px ${FONT}`;
+    c.fillText(nextKP < course.length ? `Otsi KP ${nextKP + 1}` : 'Mine finišisse!', 16, mh + 36);
+    c.textAlign = 'right'; c.fillText('⏱ ' + fmtTime(elapsed), W - 16, mh + 36);
+    c.textAlign = 'left'; c.font = `20px ${FONT}`; c.fillStyle = '#b8c8b8';
+    c.fillText(`Võetud ${Math.min(nextKP, course.length)}/${course.length} • X = kaart • Y/B = paus`, 16, mh + 84);
+  });
+}
+
+/* ---------- teated ---------- */
+const notice = new CanvasPlane(0.9, 0.13, 600);
+notice.mesh.material.depthTest = false; notice.mesh.renderOrder = 999;
+notice.mesh.position.set(0, -0.2, -1); notice.mesh.visible = false; camera.add(notice.mesh);
+let noticeT = 0, lastNotice = '';
+function notify(msg, dur = 2.5){
+  if (msg === lastNotice && noticeT > 0) return;
+  lastNotice = msg; noticeT = dur; notice.mesh.visible = true;
+  notice.draw((c, W, H) => { panelBg(c, W, H, 'rgba(0,0,0,0.75)', 30); c.fillStyle = '#fff'; c.font = `bold ${H * 0.42}px ${FONT}`; c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillText(msg, W / 2, H / 2); });
+}
+
+/* =========================================================
+   HEINAMAA (menüüd)
+   ========================================================= */
+const meadow = new THREE.Group(); scene.add(meadow);
+{
+  const g = new THREE.Mesh(new THREE.CircleGeometry(60, 48), new THREE.MeshLambertMaterial({ color: 0x7cb342 })); g.rotation.x = -Math.PI / 2; meadow.add(g);
+  const sp = [], de = [];
+  for (let i = 0; i < 70; i++) { const a = srand() * Math.PI * 2, d = 14 + srand() * 30; (srand() < 0.5 ? sp : de).push(Math.cos(a) * d, Math.sin(a) * d, 0.8 + srand() * 0.6, srand() * 6.28); }
+  meadow.add(instancedFrom(TREE.spruce.trunk, TMAT.trunk, sp, false), instancedFrom(TREE.spruce.crown, TMAT.spruce, sp, true), instancedFrom(TREE.broad.trunk, TMAT.trunk, de, false), instancedFrom(TREE.broad.crown, TMAT.broad, de, true));
+}
+function textPanel(w, h, drawFn){ const p = new CanvasPlane(w, h); p.draw(drawFn); return p; }
+
+const menuUI = new THREE.Group(); scene.add(menuUI);
+{
+  const t = textPanel(2.4, 0.6, (c, W, H) => {
+    panelBg(c, W, H); c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.fillStyle = '#ffd54f'; c.font = `bold ${H * 0.36}px ${FONT}`; c.fillText('🌲 Tarkusemets VR', W / 2, H * 0.4);
+    c.fillStyle = '#fff'; c.font = `${H * 0.15}px ${FONT}`; c.fillText('Orienteeru Kehras või harjuta õppemänge', W / 2, H * 0.78);
+  });
+  t.mesh.position.set(0, 2.05, -2.5); menuUI.add(t.mesh);
+  const b1 = makeButton('Orienteerumine\nKehra', 0.9, 0.6, () => showSelect(), { color: '#2e7d32', emoji: '🧭' });
+  const b2 = makeButton('Õppemängud', 0.9, 0.6, () => showHub(), { color: '#1565c0', emoji: '📚' });
+  b1.position.set(-0.52, 1.35, -2.4); b2.position.set(0.52, 1.35, -2.4); menuUI.add(b1, b2);
+  const help = textPanel(2.4, 0.42, (c, W, H) => {
+    panelBg(c, W, H, 'rgba(15,28,38,0.75)'); c.fillStyle = '#fff'; c.textAlign = 'center'; c.textBaseline = 'middle'; c.font = `${H * 0.15}px ${FONT}`;
+    wrapText(c, 'Suuna kiir nupule ja vajuta päästikut.\nVasak kang = liigu • vasak külgnupp = jookse • parem kang = pööra\nX = kaart (käes → suur → peidus) • Y/B = paus', W / 2, H / 2, W * 0.95, H * 0.24);
+  });
+  help.mesh.position.set(0, 0.78, -2.4); menuUI.add(help.mesh);
+}
+
+// --- ala valik ---
+const selectUI = new THREE.Group(); scene.add(selectUI);
+const TABLE_W = 1.0, TABLE_H = TABLE_W * MD / MW;
+const table = new CanvasPlane(TABLE_W, TABLE_H, 1000);
+table.mesh.position.set(0, 0.98, -0.85); table.mesh.rotation.x = -0.85; table.mesh.userData.noHover = true;
+selectUI.add(table.mesh);
+makeClickable(table.mesh, (o, hit) => {
+  if (!hit || !hit.uv || !kehraReady) return;
+  sel.cx = hit.uv.x * MW - HALF_W; sel.cz = (1 - hit.uv.y) * MD - HALF_H; sel.full = false; sel.name = 'Oma valitud ala';
+  drawTable(); drawSelInfo();
+});
+const selInfo = new CanvasPlane(1.5, 0.3); selInfo.mesh.position.set(0, 1.78, -1.35); selectUI.add(selInfo.mesh);
+let overviewCache = null, lastHoverKey = '';
+function drawTable(){
+  table.draw((c, W, H) => {
+    if (!kehraReady) { c.fillStyle = '#223'; c.fillRect(0, 0, W, H); c.fillStyle = '#fff'; c.font = `bold 46px ${FONT}`; c.textAlign = 'center'; wrapText(c, 'Laen Kehra kaarti\nOpenStreetMapist…', W / 2, H / 2, W * 0.9, 60); return; }
+    if (!overviewCache) {
+      overviewCache = document.createElement('canvas'); overviewCache.width = W; overviewCache.height = H;
+      const oc = overviewCache.getContext('2d'), T = { x0: -HALF_W, z0: -HALF_H, s: W / MW };
+      drawOMap(oc, T, W, H);
+      oc.font = `bold 22px ${FONT}`; oc.textAlign = 'center'; oc.textBaseline = 'middle';
+      PLACES.forEach(p => { const X = (p.x + HALF_W) * T.s, Y = (p.z + HALF_H) * T.s; oc.fillStyle = '#d4008f'; oc.beginPath(); oc.arc(X, Y, 6, 0, 7); oc.fill(); oc.lineWidth = 5; oc.strokeStyle = 'rgba(255,255,255,.95)'; oc.strokeText(p.name, X, Y - 18); oc.fillStyle = '#111'; oc.fillText(p.name, X, Y - 18); });
+    }
+    c.drawImage(overviewCache, 0, 0);
+    const r = selRect(), k = W / MW, X = x => (x + HALF_W) * k, Y = z => (z + HALF_H) * k;
+    c.fillStyle = 'rgba(0,0,0,0.4)'; c.beginPath(); c.rect(0, 0, W, H); c.rect(X(r.x0), Y(r.z0), (r.x1 - r.x0) * k, (r.z1 - r.z0) * k); c.fill('evenodd');
+    c.lineWidth = 6; c.strokeStyle = '#ffb300'; c.strokeRect(X(r.x0), Y(r.z0), (r.x1 - r.x0) * k, (r.z1 - r.z0) * k);
+    if (tableHoverUV && !sel.full) {
+      const h = sel.size / 2 * k, hx = tableHoverUV.x * W, hy = (1 - tableHoverUV.y) * H;
+      c.setLineDash([14, 10]); c.lineWidth = 3; c.strokeStyle = '#fff'; c.strokeRect(hx - h, hy - h, h * 2, h * 2); c.setLineDash([]);
+    }
+  });
+}
+function drawSelInfo(){
+  selInfo.draw((c, W, H) => {
+    panelBg(c, W, H); c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.fillStyle = '#ffd54f'; c.font = `bold ${H * 0.24}px ${FONT}`;
+    c.fillText(sel.full ? '🗺️ Kogu Kehra (~3,3 × 3,7 km)' : `📍 ${sel.name} • ${sel.size} m`, W / 2, H * 0.34);
+    c.fillStyle = '#fff'; c.font = `${H * 0.17}px ${FONT}`;
+    c.fillText(`${sel.diff === 'kerge' ? 'Kerge: 5 KP, näed end kaardil' : 'Raske: 8 KP, ainult kaart ja kompass'}  •  Klõpsa laual, et ala valida`, W / 2, H * 0.72);
+  });
+}
+const presetGroup = new THREE.Group(); selectUI.add(presetGroup);
+function buildPresetButtons(){
+  for (const ch of [...presetGroup.children]) { unclick(ch); presetGroup.remove(ch); disposeTree(ch); }
+  PLACES.forEach((p, i) => {
+    const b = makeButton(p.name, 0.46, 0.1, () => { sel.cx = p.x; sel.cz = p.z; sel.full = false; sel.name = p.name; drawTable(); drawSelInfo(); }, { color: '#37474f', fs: 0.34 });
+    b.position.set(-0.86, 1.55 - i * 0.12, -1.0); b.rotation.y = 0.55; presetGroup.add(b);
+  });
+}
+{
+  const opts = [
+    ['400 m ala', '#455a64', () => { sel.size = 400; sel.full = false; }],
+    ['700 m ala', '#455a64', () => { sel.size = 700; sel.full = false; }],
+    ['1 km ala', '#455a64', () => { sel.size = 1000; sel.full = false; }],
+    ['🗺️ Kogu kaart', '#6a1b9a', () => { sel.full = true; }],
+    ['Kerge', '#2e7d32', () => { sel.diff = 'kerge'; }],
+    ['Raske', '#b71c1c', () => { sel.diff = 'raske'; }],
+  ];
+  opts.forEach(([label, color, fn], i) => {
+    const b = makeButton(label, 0.42, 0.1, () => { fn(); drawTable(); drawSelInfo(); }, { color, fs: 0.4 });
+    b.position.set(0.86, 1.55 - i * 0.12, -1.0); b.rotation.y = -0.55; selectUI.add(b);
+  });
+  const go = makeButton('▶ Alusta', 0.42, 0.14, () => startKehra(), { color: '#e65100', fs: 0.45 });
+  go.position.set(0.86, 0.78, -1.0); go.rotation.y = -0.55; selectUI.add(go);
+  const back = makeButton('🏠 Menüü', 0.42, 0.1, () => goMenu(), { color: '#263238', fs: 0.4 });
+  back.position.set(-0.86, 0.5, -1.0); back.rotation.y = 0.55; selectUI.add(back);
+}
+drawTable(); drawSelInfo();
+
+const forestResUI = new THREE.Group(); scene.add(forestResUI);
+const forestResPanel = new CanvasPlane(1.3, 1.0); forestResPanel.mesh.position.y = 0.25; forestResUI.add(forestResPanel.mesh);
+{
+  const again = makeButton('🔁 Uus rada', 0.55, 0.18, () => startKehra(), { color: '#2e7d32', fs: 0.4 });
+  const other = makeButton('🗺️ Teine ala', 0.55, 0.18, () => showSelect(), { color: '#1565c0', fs: 0.4 });
+  again.position.set(-0.32, -0.42, 0.01); other.position.set(0.32, -0.42, 0.01); forestResUI.add(again, other);
+}
+
+/* =========================================================
+   PAUS
+   ========================================================= */
+const pauseUI = new THREE.Group(); pauseUI.visible = false; scene.add(pauseUI);
+const pausePanel = textPanel(0.9, 0.22, (c, W, H) => { panelBg(c, W, H); c.fillStyle = '#ffd54f'; c.font = `bold ${H * 0.5}px ${FONT}`; c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillText('⏸ Paus', W / 2, H / 2); });
+pausePanel.mesh.position.y = 0.42; pauseUI.add(pausePanel.mesh);
+const pauseForest = new THREE.Group(), pauseLearn = new THREE.Group(); pauseUI.add(pauseForest, pauseLearn);
+const exitVR = () => { closePause(); const s = renderer.xr.getSession(); if (s) s.end(); };
+[['▶ Jätka', '#2e7d32', () => closePause()], ['🔁 Alusta rada uuesti', '#455a64', () => { closePause(); restartCourse(); }], ['🗺️ Vali teine ala', '#1565c0', () => { closePause(); showSelect(); }], ['🏠 Peamenüü', '#37474f', () => { closePause(); goMenu(); }], ['🚪 Välju VR-ist', '#b71c1c', exitVR]]
+  .forEach(([l, col, fn], i) => { const b = makeButton(l, 0.62, 0.12, fn, { color: col, fs: 0.38 }); b.position.y = 0.22 - i * 0.145; pauseForest.add(b); });
+[['▶ Jätka', '#2e7d32', () => closePause()], ['🔁 Alusta mäng uuesti', '#455a64', () => { closePause(); if (lastDef) startGame(lastDef); }], ['📚 Mängude valik', '#1565c0', () => { closePause(); showHub(); }], ['🏠 Peamenüü', '#37474f', () => { closePause(); goMenu(); }], ['🚪 Välju VR-ist', '#b71c1c', exitVR]]
+  .forEach(([l, col, fn], i) => { const b = makeButton(l, 0.62, 0.12, fn, { color: col, fs: 0.38 }); b.position.y = 0.22 - i * 0.145; pauseLearn.add(b); });
+let gameUIWasVisible = false;
+function openPause(){
+  paused = true; pauseUI.visible = true;
+  const inForest = state === 'forest';
+  pauseForest.visible = inForest; pauseLearn.visible = !inForest;
+  gameUIWasVisible = gameUI.visible; gameUI.visible = false;
+  const exitBtn = (inForest ? pauseForest : pauseLearn).children[4]; exitBtn.visible = renderer.xr.isPresenting;
+  camera.getWorldPosition(head); camera.getWorldDirection(fwd); fwd.y = 0; fwd.normalize();
+  pauseUI.position.copy(head).addScaledVector(fwd, 1.3); pauseUI.position.y = head.y - 0.15;
+  pauseUI.lookAt(head.x, pauseUI.position.y, head.z);
+}
+function closePause(){ if (!paused) return; paused = false; pauseUI.visible = false; if (gameUIWasVisible && state === 'learn' && game) gameUI.visible = true; gameUIWasVisible = false; }
+function menuButton(){
+  if (paused) return closePause();
+  if ((state === 'forest' && !finished) || (state === 'learn' && game && gameUI.visible)) return openPause();
+  if (state !== 'menu') goMenu();
+}
+
+/* =========================================================
+   ÕPPEMÄNGUD
+   ========================================================= */
+const hubUI = new THREE.Group(); scene.add(hubUI);
+const gameUI = new THREE.Group(); scene.add(gameUI);
+const board = new CanvasPlane(2.4, 0.8); board.mesh.position.set(0, 2.05, -2.6); gameUI.add(board.mesh);
+const visualGroup = new THREE.Group(); visualGroup.position.set(0, 1.4, -2.4); gameUI.add(visualGroup);
+const answersGroup = new THREE.Group(); answersGroup.position.set(0, 0.95, -1.3); gameUI.add(answersGroup);
+{ const back = makeButton('◀ Mängud', 0.42, 0.15, () => showHub(), { color: '#455a64', fs: 0.45 }); back.position.set(-1.05, 1.5, -2.55); gameUI.add(back); }
+const learnResUI = new THREE.Group(); scene.add(learnResUI);
+const learnResPanel = new CanvasPlane(1.6, 0.8); learnResPanel.mesh.position.set(0, 1.75, -2.3); learnResUI.add(learnResPanel.mesh);
+let lastDef = null;
+{
+  const again = makeButton('🔁 Uuesti', 0.6, 0.2, () => lastDef && startGame(lastDef), { color: '#2e7d32', fs: 0.42 });
+  const hub = makeButton('📚 Mängude valik', 0.6, 0.2, () => showHub(), { color: '#1565c0', fs: 0.36 });
+  again.position.set(-0.35, 1.1, -2.25); hub.position.set(0.35, 1.1, -2.25); learnResUI.add(again, hub);
+}
+const ROUND = 10;
+const WORDS = [
+  ['🐶','KOER','DOG'],['🐱','KASS','CAT'],['🐄','LEHM','COW'],['🐴','HOBUNE','HORSE'],['🐟','KALA','FISH'],
+  ['🐦','LIND','BIRD'],['🌳','PUU','TREE'],['🏠','MAJA','HOUSE'],['🚗','AUTO','CAR'],['☀️','PÄIKE','SUN'],
+  ['🌙','KUU','MOON'],['🍎','ÕUN','APPLE'],['🌸','LILL','FLOWER'],['⚽','PALL','BALL'],['📖','RAAMAT','BOOK'],
+  ['🐸','KONN','FROG'],['🐻','KARU','BEAR'],['🦊','REBANE','FOX'],['🐭','HIIR','MOUSE'],['🥛','PIIM','MILK'],
+  ['🍞','LEIB','BREAD'],['🚲','JALGRATAS','BICYCLE'],['⭐','TÄHT','STAR'],['🔑','VÕTI','KEY'],['🐝','MESILANE','BEE'],
+  ['🍓','MAASIKAS','STRAWBERRY'],['⛵','PAAT','BOAT'],['🦆','PART','DUCK']
+];
+const COLORS = [['PUNANE','#e53935'],['SININE','#1e88e5'],['ROHELINE','#43a047'],['KOLLANE','#fdd835'],['ORANŽ','#fb8c00'],['LILLA','#8e24aa'],['ROOSA','#f06292'],['PRUUN','#6d4c41'],['MUST','#222222'],['VALGE','#f5f5f5']];
+const SHAPES = {
+  'KUUP': () => new THREE.BoxGeometry(0.24, 0.24, 0.24), 'KERA': () => new THREE.SphereGeometry(0.15, 24, 16),
+  'KOONUS': () => new THREE.ConeGeometry(0.15, 0.3, 24), 'SILINDER': () => new THREE.CylinderGeometry(0.12, 0.12, 0.28, 24),
+  'PÜRAMIID': () => new THREE.ConeGeometry(0.18, 0.3, 4), 'RÕNGAS': () => new THREE.TorusGeometry(0.12, 0.045, 12, 28)
+};
+const BALLOON_COLS = ['#ef5350','#42a5f5','#66bb6a','#ffb300','#ab47bc','#ff7043','#26c6da','#ec407a'];
+function numQ(text, correct, cands){
+  const s = new Set([correct]);
+  for (const v of shuffle(cands.filter(v => v >= 0 && v !== correct))) { if (s.size >= 4) break; s.add(v); }
+  let k = 1; while (s.size < 4) { s.add(correct + k); k++; }
+  const opts = shuffle([...s]);
+  return { text, answers: opts.map(v => ({ label: String(v) })), correct: opts.indexOf(correct) };
+}
+function wordQ(text, correctLabel, pool, extra = {}){
+  const others = shuffle([...new Set(pool.filter(l => l !== correctLabel))]).slice(0, 3), opts = shuffle([correctLabel, ...others]);
+  return { text, answers: opts.map(l => ({ label: l })), correct: opts.indexOf(correctLabel), ...extra };
+}
+const GAMES = [
+  { name: 'Liida ja lahuta', emoji: '➕', color: '#c62828', gen(){ let a = randInt(1, 10), b = randInt(1, 10);
+      if (rand() < 0.5) return numQ(`${a} + ${b} = ?`, a + b, [a + b - 1, a + b + 1, a + b - 2, a + b + 2, a + b + 10, a * b]);
+      if (a < b) [a, b] = [b, a]; return numQ(`${a} − ${b} = ?`, a - b, [a - b - 1, a - b + 1, a - b + 2, a + b, a - b - 2]); } },
+  { name: 'Korrutamine', emoji: '✖️', color: '#ad1457', gen(){ const a = randInt(2, 10), b = randInt(1, 10);
+      return numQ(`${a} · ${b} = ?`, a * b, [a * (b + 1), a * (b - 1), (a + 1) * b, (a - 1) * b, a * b + 1, a * b - 1, a + b]); } },
+  { name: 'Pilt ja sõna', emoji: '🖼️', color: '#6a1b9a', gen(){ const w = pick(WORDS); return wordQ('Mis see on?', w[1], WORDS.map(x => x[1]), { emoji: w[0] }); } },
+  { name: 'Puuduv täht', emoji: '🔤', color: '#4527a0', gen(){ const w = pick(WORDS.filter(x => x[1].length >= 3 && x[1].length <= 7)), word = w[1];
+      const i = randInt(0, word.length - 1), masked = word.split('').map((ch, j) => j === i ? '_' : ch).join(' ');
+      return wordQ(`Mis täht puudub?\n${masked}`, word[i], 'AEIOUÕÄÖÜKLMNPRSTVHJ'.split(''), { emoji: w[0] }); } },
+  { name: 'Inglise keel', emoji: '💬', color: '#1565c0', gen(){ const w = pick(WORDS); return wordQ(`Kuidas on inglise keeles\n${w[1]}?`, w[2], WORDS.map(x => x[2]), { emoji: w[0] }); } },
+  { name: 'Loendamine', emoji: '🔢', color: '#00838f', gen(){ const n = randInt(1, 10), type = rand() < 0.5 ? 'apple' : 'cube';
+      return { ...numQ(type === 'apple' ? 'Mitu õuna on?' : 'Mitu kuubikut on?', n, [n - 1, n + 1, n - 2, n + 2, n + 3].filter(v => v > 0)), count: n, countType: type }; } },
+  { name: 'Värvid', emoji: '🎨', color: '#ef6c00', gen(){ const opts = shuffle([...COLORS]).slice(0, 4), t = randInt(0, 3);
+      return { text: `Leia ${opts[t][0]} õhupall!`, answers: opts.map(c => ({ color: c[1] })), correct: t }; } },
+  { name: 'Kujundid', emoji: '🔷', color: '#2e7d32', gen(){ const names = shuffle(Object.keys(SHAPES)).slice(0, 4), t = randInt(0, 3), cols = shuffle([...BALLOON_COLS]);
+      return { text: `Leia ${names[t]}!`, answers: names.map((s, i) => ({ shape: s, color: cols[i] })), correct: t }; } }
+];
+{
+  const t = textPanel(2.4, 0.42, (c, W, H) => { panelBg(c, W, H); c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillStyle = '#ffd54f'; c.font = `bold ${H * 0.42}px ${FONT}`; c.fillText('📚 Vali õppemäng', W / 2, H / 2); });
+  t.mesh.position.set(0, 2.15, -2.3); hubUI.add(t.mesh);
+  GAMES.forEach((def, i) => { const b = makeButton(def.name, 0.55, 0.45, () => startGame(def), { color: def.color, emoji: def.emoji }); b.position.set(-0.9 + (i % 4) * 0.6, i < 4 ? 1.62 : 1.08, -2.2); hubUI.add(b); });
+  const back = makeButton('🏠 Peamenüü', 0.6, 0.18, () => goMenu(), { color: '#455a64', fs: 0.42 }); back.position.set(0, 0.62, -2.2); hubUI.add(back);
+}
+const appleGeo = new THREE.SphereGeometry(0.05, 16, 12), appleMat = new THREE.MeshLambertMaterial({ color: 0xd32f2f });
+const cubeGeo = new THREE.BoxGeometry(0.075, 0.075, 0.075), cubeMat = new THREE.MeshLambertMaterial({ color: 0x1e88e5 });
+const balloonGeo = new THREE.SphereGeometry(0.17, 20, 16);
+const stringGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, -0.2, 0), new THREE.Vector3(0, -0.5, 0)]);
+const stringMat = new THREE.LineBasicMaterial({ color: 0xeeeeee });
+[appleGeo, appleMat, cubeGeo, cubeMat, balloonGeo, stringGeo, stringMat].forEach(o => SHARED.add(o));
+function emojiPlane(e, size = 0.5){ const p = new CanvasPlane(size, size, 400); p.draw((c, W, H) => { c.fillStyle = 'rgba(255,255,255,.93)'; roundRect(c, 4, 4, W - 8, H - 8, 40); c.fill(); c.textAlign = 'center'; c.textBaseline = 'middle'; c.font = `${H * 0.66}px ${FONT}`; c.fillText(e, W / 2, H * 0.55); }); return p.mesh; }
+function countVisual(n, type){
+  const g = new THREE.Group(), cols = 5, sp = 0.14, rows = Math.ceil(n / cols);
+  for (let i = 0; i < n; i++) { const r = Math.floor(i / cols), col = i % cols, rowCount = Math.min(cols, n - r * cols);
+    const m = type === 'apple' ? new THREE.Mesh(appleGeo, appleMat) : new THREE.Mesh(cubeGeo, cubeMat); if (type !== 'apple') m.rotation.set(0.4, 0.6, 0);
+    m.position.set((col - (rowCount - 1) / 2) * sp, ((rows - 1) / 2 - r) * sp, 0); g.add(m); }
+  return g;
+}
+function makeBalloon(color, label){
+  const g = new THREE.Group(), s = new THREE.Mesh(balloonGeo, new THREE.MeshLambertMaterial({ color })); s.scale.set(1, 1.15, 1); g.add(s);
+  g.add(new THREE.Line(stringGeo, stringMat));
+  if (label != null) {
+    const p = new CanvasPlane(0.42, 0.2, 500);
+    p.draw((c, W, H) => { c.textAlign = 'center'; c.textBaseline = 'middle'; let fs = H * 0.62; c.font = `bold ${fs}px ${FONT}`;
+      while (c.measureText(label).width > W * 0.95 && fs > 10) { fs -= 2; c.font = `bold ${fs}px ${FONT}`; }
+      c.lineWidth = fs * 0.2; c.strokeStyle = 'rgba(0,0,0,.7)'; c.strokeText(label, W / 2, H / 2); c.fillStyle = '#fff'; c.fillText(label, W / 2, H / 2); });
+    p.mesh.position.z = 0.2; g.add(p.mesh);
+  }
+  return { group: g, hit: s };
+}
+let game = null;
+function clearGameObjects(){ for (const ch of [...answersGroup.children, ...visualGroup.children]) { unclick(ch); ch.parent.remove(ch); disposeTree(ch); } }
+function startGame(def){ state = 'learn'; lastDef = def; showUI('game'); game = { def, qi: 0, score: 0, answers: [] }; nextQuestion(); }
+function nextQuestion(){
+  clearGameObjects(); game.answers = [];
+  if (game.qi >= ROUND) return endGame();
+  const q = game.q = game.def.gen(); game.firstTry = true; game.locked = false;
+  drawBoard();
+  if (q.emoji) visualGroup.add(emojiPlane(q.emoji));
+  if (q.count) visualGroup.add(countVisual(q.count, q.countType));
+  const n = q.answers.length, palette = shuffle([...BALLOON_COLS]);
+  q.answers.forEach((a, i) => {
+    let obj, hit;
+    if (a.shape) { hit = new THREE.Mesh(SHAPES[a.shape](), new THREE.MeshLambertMaterial({ color: a.color })); hit.rotation.x = 0.35; obj = new THREE.Group(); obj.add(hit); }
+    else { const b = makeBalloon(a.color || palette[i % palette.length], a.label ?? null); obj = b.group; hit = b.hit; }
+    const x = (i - (n - 1) / 2) * 0.5; obj.position.set(x, 0, 0); obj.userData.baseX = x; obj.userData.phase = i * 1.3;
+    answersGroup.add(obj); makeClickable(hit, () => onAnswer(i));
+    game.answers.push({ group: obj, hit, dead: false, isShape: !!a.shape });
+  });
+}
+function drawBoard(){
+  board.draw((c, W, H) => {
+    panelBg(c, W, H); c.textBaseline = 'middle'; c.font = `bold ${H * 0.11}px ${FONT}`; c.fillStyle = '#ffd54f'; c.textAlign = 'left';
+    c.fillText(`${game.def.emoji} ${game.def.name}`, 30, H * 0.13);
+    c.textAlign = 'right'; c.fillStyle = '#fff'; c.fillText(`${Math.min(game.qi + 1, ROUND)}/${ROUND}   ⭐ ${game.score}`, W - 30, H * 0.13);
+    c.textAlign = 'center'; c.font = `bold ${H * 0.2}px ${FONT}`; wrapText(c, game.q.text, W / 2, H * 0.58, W * 0.92, H * 0.23);
+  });
+}
+function onAnswer(i){
+  if (!game || game.locked || paused) return;
+  const a = game.answers[i]; if (a.dead) return;
+  if (i === game.q.correct) {
+    game.locked = true; if (game.firstTry) game.score++;
+    sfx.ok(); a.group.userData.popT = 0; a.hit.userData.noHover = true; unclick(a.hit); game.qi++; drawBoard();
+    const g = game; setTimeout(() => { if (game === g && state === 'learn') nextQuestion(); }, 900);
+  } else {
+    game.firstTry = false; sfx.bad(); a.dead = true; a.group.userData.shakeT = 0.4; a.hit.userData.noHover = true; a.hit.scale.copy(a.hit.userData.baseScale); unclick(a.hit);
+    a.hit.material.color.set(0x777777); a.group.traverse(o => { if (o !== a.hit && o.material && o.material.map) o.material.opacity = 0.35; });
+  }
+}
+function endGame(){
+  showUI('learnRes'); sfx.win();
+  const s = game.score, stars = s >= 9 ? 3 : s >= 7 ? 2 : s >= 4 ? 1 : 0;
+  const msg = stars === 3 ? 'Super! Oled tõeline tarkpea!' : stars === 2 ? 'Väga tubli!' : stars === 1 ? 'Hea töö, harjuta veel!' : 'Proovi uuesti, sa saad hakkama!';
+  learnResPanel.draw((c, W, H) => {
+    panelBg(c, W, H); c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.fillStyle = '#ffd54f'; c.font = `bold ${H * 0.13}px ${FONT}`; c.fillText(`${game.def.emoji} ${game.def.name}`, W / 2, H * 0.15);
+    c.font = `${H * 0.24}px ${FONT}`; c.fillText('★'.repeat(stars) + '☆'.repeat(3 - stars), W / 2, H * 0.42);
+    c.fillStyle = '#fff'; c.font = `bold ${H * 0.13}px ${FONT}`; c.fillText(`Esimese korraga õigesti: ${s} / ${ROUND}`, W / 2, H * 0.66);
+    c.font = `${H * 0.11}px ${FONT}`; c.fillText(msg, W / 2, H * 0.84);
+  });
+}
+function updateAnswers(dt, t){
+  if (!game) return;
+  for (const a of game.answers) {
+    const g = a.group, u = g.userData;
+    if (u.popT !== undefined) { u.popT += dt; g.scale.setScalar(1 + u.popT * 5); if (u.popT > 0.22) g.visible = false; continue; }
+    g.position.y = Math.sin(t * 2 + u.phase) * 0.03;
+    if (u.shakeT > 0) { u.shakeT -= dt; g.position.x = u.baseX + Math.sin(t * 70) * 0.025 * (u.shakeT / 0.4); } else g.position.x = u.baseX;
+    if (a.isShape) a.hit.rotation.y += dt * 0.8;
+  }
+}
+
+/* =========================================================
+   OLEKUD
+   ========================================================= */
+let state = 'menu';
+function showUI(name){
+  menuUI.visible = name === 'menu'; hubUI.visible = name === 'hub'; gameUI.visible = name === 'game';
+  learnResUI.visible = name === 'learnRes'; forestResUI.visible = name === 'forestRes'; selectUI.visible = name === 'select';
+}
+function setEnv(env){
+  const k = env === 'kehra';
+  kehra.visible = k; meadow.visible = !k; skyMesh.visible = k;
+  scene.background = k ? HORIZON : SKY;
+  scene.fog = k ? new THREE.Fog(HORIZON, 55, 250) : null;
+}
+function placePlayer(x, z, yaw = 0){
+  const e = new THREE.Euler().setFromQuaternion(camera.quaternion, 'YXZ');
+  const ry = renderer.xr.isPresenting ? yaw - e.y : yaw;
+  rig.rotation.set(0, ry, 0);
+  const off = renderer.xr.isPresenting ? new THREE.Vector3(camera.position.x, 0, camera.position.z).applyAxisAngle(UP, ry) : new THREE.Vector3();
+  rig.position.set(x - off.x, 0, z - off.z);
+}
+function toMeadow(ui){ closePause(); game = null; finished = true; clearGameObjects(); setEnv('meadow'); showUI(ui); placePlayer(0, 0, 0); mapHolder.visible = false; }
+function goMenu(){ state = 'menu'; toMeadow('menu'); }
+function showHub(){ state = 'learn'; toMeadow('hub'); }
+function showSelect(){ state = 'select'; toMeadow('select'); drawTable(); drawSelInfo(); }
+function startKehra(){
+  if (!kehraReady) { notify('Kaart alles laeb…'); return; }
+  closePause();
+  state = 'forest'; game = null; clearGameObjects(); setEnv('kehra'); showUI('none');
+  const r = selRect(), res = genCourse(r, sel.diff === 'kerge' ? 5 : 8);
+  startPt = res.start; course = res.pts;
+  for (const ch of [...kpGroup.children]) { kpGroup.remove(ch); disposeTree(ch); }
+  course.forEach((p, i) => { const k = makeKP(i + 1); k.position.set(p.x, heightAt(p.x, p.z), p.z); kpGroup.add(k); });
+  gate.position.set(startPt.x, heightAt(startPt.x, startPt.z - 3), startPt.z - 3);
+  buildMap(r);
+  restartCourse();
+}
+function restartCourse(){
+  nextKP = 0; elapsed = 0; finished = false; mapMode = 0; placeMap(); mapTimer = 1;
+  course.forEach(p => { delete p.split; });
+  showUI('none'); placePlayer(startPt.x, startPt.z, 0);
+  updateChunks(true); updateGrass(true);
+  notify('Start! Vaata kaarti ja otsi KP 1', 4);
+}
+function finishRun(){
+  finished = true; sfx.win();
+  forestResPanel.draw((c, W, H) => {
+    panelBg(c, W, H); c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.fillStyle = '#ffd54f'; c.font = `bold ${H * 0.11}px ${FONT}`; c.fillText('🏁 Finiš!', W / 2, H * 0.1);
+    c.fillStyle = '#fff'; c.font = `bold ${H * 0.075}px ${FONT}`;
+    c.fillText(`${sel.full ? 'Kogu kaart' : sel.name} • ${sel.diff} • aeg ${fmtTime(elapsed)}`, W / 2, H * 0.22);
+    c.font = `${H * 0.055}px ${FONT}`; c.fillStyle = '#cfd8dc';
+    let prev = 0;
+    course.forEach((p, i) => { c.fillText(`KP ${i + 1}: ${fmtTime(p.split)}  (+${fmtTime(p.split - prev)})`, W / 2, H * 0.34 + i * H * 0.07); prev = p.split; });
+  });
+  showUI('forestRes'); mapHolder.visible = false;
+  camera.getWorldPosition(head); camera.getWorldDirection(fwd); fwd.y = 0; fwd.normalize();
+  forestResUI.position.copy(head).addScaledVector(fwd, 1.8); forestResUI.position.y = head.y - 0.1;
+  forestResUI.lookAt(head.x, forestResUI.position.y, head.z);
+}
+
+function updateForest(dt){
+  if (paused) { mapHolder.visible = false; return; }
+  if (!renderer.xr.isPresenting) {
+    if (keys.KeyW || keys.ArrowUp) moveInput.y -= 1; if (keys.KeyS || keys.ArrowDown) moveInput.y += 1;
+    if (keys.KeyA) moveInput.x -= 1; if (keys.KeyD) moveInput.x += 1;
+    if (keys.ArrowLeft) rig.rotation.y += 1.8 * dt; if (keys.ArrowRight) rig.rotation.y -= 1.8 * dt;
+  }
+  const mx = moveInput.x, my = moveInput.y, len = Math.hypot(mx, my);
+  const inWater = isWater(rig.position.x, rig.position.z);
+  if (!finished && len > 0.15) {
+    camera.getWorldDirection(fwd); fwd.y = 0; fwd.normalize();
+    const fv = forestAt(rig.position.x, rig.position.z);
+    let speed = inWater ? 0.9 : fv > 100 ? 2.4 : fv > 30 ? 2.0 : 3.4;
+    if (keys.ShiftLeft || sprintXR) speed *= 1.9;
+    speed *= Math.min(1, len);
+    const dx = (fwd.x * -my + -fwd.z * mx) / len * speed * dt, dz = (fwd.z * -my + fwd.x * mx) / len * speed * dt;
+    const px = rig.position.x, pz = rig.position.z, lim = (v, L) => Math.abs(v) < L - 3;
+    const ok = (x, z) => lim(x, HALF_W) && lim(z, HALF_H) && !inBuilding(x, z);
+    if (ok(px + dx, pz + dz)) { rig.position.x += dx; rig.position.z += dz; }
+    else if (ok(px + dx, pz)) rig.position.x += dx;
+    else if (ok(px, pz + dz)) rig.position.z += dz;
+    else if (!lim(px + dx, HALF_W) || !lim(pz + dz, HALF_H)) notify('Kaardi serv – pööra tagasi');
+    if (!inWater && isWater(rig.position.x, rig.position.z)) notify('Vesi! Ujudes läheb aeglaselt – otsi sild');
+  }
+  const by = bridgeY(rig.position.x, rig.position.z), gy = by !== null ? by : heightAt(rig.position.x, rig.position.z);
+  rig.position.y = THREE.MathUtils.lerp(rig.position.y, gy, Math.min(1, dt * 8));
+
+  if (!finished) {
+    elapsed += dt; camera.getWorldPosition(head);
+    if (nextKP < course.length) {
+      const kp = course[nextKP];
+      if (Math.hypot(head.x - kp.x, head.z - kp.z) < 4) {
+        sfx.punch(); kp.split = elapsed; nextKP++;
+        notify(nextKP < course.length ? `KP ${nextKP} ✓  Nüüd otsi KP ${nextKP + 1}` : `KP ${nextKP} ✓  Nüüd finišisse!`, 3);
+      } else for (let i = nextKP + 1; i < course.length; i++)
+        if (Math.hypot(head.x - course[i].x, head.z - course[i].z) < 4) notify(`See on KP ${i + 1}. Võta enne KP ${nextKP + 1}!`);
+    } else if (Math.hypot(head.x - startPt.x, head.z - startPt.z) < 5) finishRun();
+  }
+  mapHolder.visible = mapMode !== 2 && !finished;
+  mapTimer += dt;
+  if (mapHolder.visible && mapTimer > 0.2) { mapTimer = 0; updateMapPanel(); }
+  chunkTimer += dt; if (chunkTimer > 0.4) { chunkTimer = 0; updateChunks(); updateGrass(false); }
+}
+
+/* ---------- XR sessioon ---------- */
+const info = document.getElementById('info');
+renderer.xr.addEventListener('sessionstart', () => { camera.rotation.set(0, 0, 0); pitch = 0; info.style.display = 'none'; setTimeout(() => { if (state !== 'forest') placePlayer(0, 0, 0); }, 300); });
+renderer.xr.addEventListener('sessionend', () => { leftGrip = null; placeMap(); info.style.display = ''; camera.position.set(0, 1.6, 0); });
+
+/* ---------- põhitsükkel ---------- */
+const clock = new THREE.Clock();
+placeMap(); goMenu();
+let tableTimer = 0;
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.1), t = clock.elapsedTime;
+  moveInput.set(0, 0);
+  updateXRInput();
+  if (state === 'forest') updateForest(dt); else { mapHolder.visible = false; rig.position.y = 0; }
+  if (!paused) updateAnswers(dt, t);
+  if (noticeT > 0) { noticeT -= dt; if (noticeT <= 0) notice.mesh.visible = false; }
+  if (skyMesh.visible) { camera.getWorldPosition(head); skyMesh.position.copy(head); skyMesh.material.uniforms.time.value = t; }
+  if (waterMat && kehra.visible) { waterNormal.offset.x = t * 0.02; waterNormal.offset.y = t * 0.013; }
+  updateRays();
+  if (state === 'select') {
+    tableTimer += dt;
+    const key = tableHoverUV ? `${Math.round(tableHoverUV.x * 200)},${Math.round(tableHoverUV.y * 200)}` : '';
+    if (key !== lastHoverKey && tableTimer > 0.08) { lastHoverKey = key; tableTimer = 0; drawTable(); }
+  }
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
